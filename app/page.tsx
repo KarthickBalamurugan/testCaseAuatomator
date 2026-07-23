@@ -1,65 +1,380 @@
-import Image from "next/image";
+"use client";
 
-export default function Home() {
+import { useState } from "react";
+import * as XLSX from "xlsx";
+import { Upload, FileSpreadsheet, Search, X, CheckCircle2 } from "lucide-react";
+
+// Column layout used across the testcase sheets in this workbook:
+// [Test case ID, Requirement ID, Title, Objective, Preconditions, ts (s), Pass/Fail Criteria, Priority, Status, Notes]
+const FIELD_ORDER = [
+  "testCaseId",
+  "requirementId",
+  "title",
+  "objective",
+  "preconditions",
+  "ts",
+  "passFailCriteria",
+  "priority",
+  "status",
+  "notes",
+];
+
+function parseWorkbook(arrayBuffer) {
+  const wb = XLSX.read(arrayBuffer, { type: "array" });
+  const testCases = [];
+
+  wb.SheetNames.forEach((sheetName) => {
+    const sheet = wb.Sheets[sheetName];
+    const rows = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: null });
+    if (!rows || rows.length < 2) return;
+
+    // Only treat sheets that look like testcase tables (first cell of header is "Test case ID")
+    const header = rows[0];
+    if (!header || typeof header[0] !== "string" || !header[0].toLowerCase().includes("test case id")) {
+      return;
+    }
+
+    for (let i = 1; i < rows.length; i++) {
+      const row = rows[i];
+      if (!row || row.length === 0) continue;
+      const tcId = row[0];
+      // Skip requirement-header grouping rows (e.g. "REQ-..." with nothing else on the row)
+      if (typeof tcId !== "string" || !tcId.toUpperCase().startsWith("TC-")) continue;
+
+      const entry = { sheet: sheetName };
+      FIELD_ORDER.forEach((key, idx) => {
+        entry[key] = row[idx] !== undefined && row[idx] !== null ? String(row[idx]) : "";
+      });
+      console.log("Parsing row:", entry);
+      testCases.push(entry);
+    }
+  });
+
+  return testCases;
+}
+
+export default function TestRequirementForm() {
+  const [modelName, setModelName] = useState("");
+  const [fileName, setFileName] = useState("");
+  const [allTestCases, setAllTestCases] = useState([]);
+  const [parseError, setParseError] = useState("");
+  const [numPorts, setNumPorts] = useState(0);
+  const [ports, setPorts] = useState([]);
+  const [reqId, setReqId] = useState("");
+  const [matched, setMatched] = useState(null); // null = not searched yet
+
+  // --- Generation state ---
+  const [isGenerating, setIsGenerating] = useState(false);
+  const [generateError, setGenerateError] = useState("");
+  const [generateSuccess, setGenerateSuccess] = useState("");
+
+  const handleFileUpload = async (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setParseError("");
+    setMatched(null);
+    setReqId("");
+    setGenerateError("");
+    setGenerateSuccess("");
+
+    try {
+      const buffer = await file.arrayBuffer();
+      const testCases = parseWorkbook(buffer);
+      if (testCases.length === 0) {
+        setParseError("No testcases found in this file. Check that it has a 'Test case ID' column.");
+        setAllTestCases([]);
+        setFileName("");
+        return;
+      }
+      console.log(testCases)
+      setAllTestCases(testCases);
+      setFileName(file.name);
+    } catch (err) {
+      console.error(err);
+      setParseError("Couldn't read that file. Make sure it's a valid .xlsx workbook.");
+      setAllTestCases([]);
+      setFileName("");
+    }
+  };
+
+  const clearFile = () => {
+    setFileName("");
+    setAllTestCases([]);
+    setMatched(null);
+    setReqId("");
+    setParseError("");
+    setGenerateError("");
+    setGenerateSuccess("");
+  };
+
+  const handleReqIdChange = (value) => {
+    setReqId(value);
+    setGenerateError("");
+    setGenerateSuccess("");
+    const trimmed = value.trim().toLowerCase();
+    if (!trimmed) {
+      setMatched(null);
+      return;
+    }
+    const results = allTestCases.filter(
+      (tc) => tc.requirementId.trim().toLowerCase() === trimmed
+    );
+    console.log(results)
+    setMatched(results);
+  };
+
+  const handlePortCountChange = (value) => {
+    const n = Number(value);
+    setNumPorts(n);
+    setPorts((prev) => {
+      const updated = [...prev];
+      if (n > updated.length) {
+        while (updated.length < n) updated.push({ key: "", value: "" });
+      } else {
+        updated.splice(n);
+      }
+      return updated;
+    });
+  };
+
+  const handlePortChange = (index, field, value) => {
+    const updated = [...ports];
+    updated[index][field] = value;
+    setPorts(updated);
+  };
+
+  const handleGenerate = async () => {
+    setGenerateError("");
+    setGenerateSuccess("");
+
+    if (!modelName.trim()) {
+      setGenerateError("Enter a model name first.");
+      return;
+    }
+    if (!reqId.trim() || !matched || matched.length === 0) {
+      setGenerateError("Look up a requirement ID with matching testcases first.");
+      return;
+    }
+
+    // Build a requirement description from the matched testcase rows
+    const requirementDescription = matched
+      .map(
+        (tc) =>
+          `${tc.testCaseId} - ${tc.title}: ${tc.objective} (Pass/Fail: ${tc.passFailCriteria})`
+      )
+      .join("\n");
+
+    const portNames = ports.map((p) => p.key.trim()).filter(Boolean);
+
+    setIsGenerating(true);
+    try {
+      const res = await fetch("/api", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          modelName: modelName.trim(),
+          requirementId: reqId.trim(),
+          requirementDescription,
+          ports: portNames,
+          count: matched.length || 5,
+        }),
+      });
+
+      if (!res.ok) {
+        const errBody = await res.json().catch(() => ({}));
+        throw new Error(errBody.error || `Request failed with status ${res.status}`);
+      }
+
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `MBD_TestSuite_${reqId.trim()}.m`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+
+      setGenerateSuccess("Test suite generated and downloaded successfully.");
+    } catch (err) {
+      console.error(err);
+      setGenerateError(err.message || "Something went wrong generating the test suite.");
+    } finally {
+      setIsGenerating(false);
+    }
+  };
+
   return (
-    <div className="flex flex-col flex-1 items-center justify-center bg-zinc-50 font-sans dark:bg-black">
-      <main className="flex flex-1 w-full max-w-3xl flex-col items-center justify-between py-32 px-16 bg-white dark:bg-black sm:items-start">
-        <Image
-          className="dark:invert"
-          src="/next.svg"
-          alt="Next.js logo"
-          width={100}
-          height={20}
-          priority
+    <div className="max-w-3xl mx-auto p-6 space-y-6">
+      {/* Model Name */}
+      <div>
+        <label className="block text-sm font-medium mb-2 text-gray-800">Model Name</label>
+        <input
+          type="text"
+          value={modelName}
+          onChange={(e) => setModelName(e.target.value)}
+          className="w-full rounded-lg border border-gray-300 px-4 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
         />
-        <div className="flex flex-col items-center gap-6 text-center sm:items-start sm:text-left">
-          <h1 className="max-w-xs text-3xl font-semibold leading-10 tracking-tight text-black dark:text-zinc-50">
-            To get started, edit the page.tsx file.
-          </h1>
-          <p className="max-w-md text-lg leading-8 text-zinc-600 dark:text-zinc-400">
-            Looking for a starting point or more instructions? Head over to{" "}
-            <a
-              href="https://vercel.com/templates?framework=next.js&utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
+      </div>
+
+      {/* Excel Upload */}
+      <div>
+        <label className="block text-sm font-medium mb-2 text-gray-800">Testcase Workbook</label>
+
+        {!fileName ? (
+          <label className="flex flex-col items-center justify-center gap-2 w-full rounded-lg border-2 border-dashed border-gray-300 px-4 py-8 cursor-pointer hover:border-blue-400 hover:bg-blue-50/40 transition-colors">
+            <Upload className="w-6 h-6 text-gray-400" />
+            <span className="text-sm text-gray-600">
+              <span className="text-blue-600 font-medium">Click to upload</span> an .xlsx testcase file
+            </span>
+            <input type="file" accept=".xlsx,.xls" onChange={handleFileUpload} className="hidden" />
+          </label>
+        ) : (
+          <div className="flex items-center justify-between rounded-lg border border-gray-300 px-4 py-3 bg-gray-50">
+            <div className="flex items-center gap-2 min-w-0">
+              <FileSpreadsheet className="w-5 h-5 text-green-600 shrink-0" />
+              <span className="text-sm text-gray-800 truncate">{fileName}</span>
+              <span className="text-xs text-gray-500 shrink-0">
+                ({allTestCases.length} testcase{allTestCases.length === 1 ? "" : "s"} found)
+              </span>
+            </div>
+            <button
+              type="button"
+              onClick={clearFile}
+              className="text-gray-400 hover:text-gray-600 shrink-0 ml-2"
             >
-              Templates
-            </a>{" "}
-            or the{" "}
-            <a
-              href="https://nextjs.org/learn?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Learning
-            </a>{" "}
-            center.
-          </p>
-        </div>
-        <div className="flex flex-col gap-4 text-base font-medium sm:flex-row">
-          <a
-            className="flex h-12 w-full items-center justify-center gap-2 rounded-full bg-foreground px-5 text-background transition-colors hover:bg-[#383838] dark:hover:bg-[#ccc] md:w-[158px]"
-            href="https://vercel.com/new?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            <Image
-              className="dark:invert"
-              src="/vercel.svg"
-              alt="Vercel logomark"
-              width={16}
-              height={16}
+              <X className="w-4 h-4" />
+            </button>
+          </div>
+        )}
+
+        {parseError && <p className="mt-2 text-sm text-red-600">{parseError}</p>}
+      </div>
+
+      {/* Requirement ID lookup */}
+      {fileName && !parseError && (
+        <div>
+          <label className="block text-sm font-medium mb-2 text-gray-800">Requirement ID</label>
+          <div className="relative">
+            <Search className="w-4 h-4 text-gray-400 absolute left-3 top-1/2 -translate-y-1/2" />
+            <input
+              type="text"
+              value={reqId}
+              onChange={(e) => handleReqIdChange(e.target.value)}
+              placeholder="e.g. REQ-IB_BHMS-SC-PSB-002"
+              className="w-full rounded-lg border border-gray-300 pl-9 pr-4 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
             />
-            Deploy Now
-          </a>
-          <a
-            className="flex h-12 w-full items-center justify-center rounded-full border border-solid border-black/[.08] px-5 transition-colors hover:border-transparent hover:bg-black/[.04] dark:border-white/[.145] dark:hover:bg-[#1a1a1a] md:w-[158px]"
-            href="https://nextjs.org/docs?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            Documentation
-          </a>
+          </div>
         </div>
-      </main>
+      )}
+
+      {/* Preview table */}
+      {matched !== null && (
+        <div>
+          {matched.length === 0 ? (
+            <p className="text-sm text-gray-500 italic">
+              No testcases found for "{reqId}". Check the requirement ID and try again.
+            </p>
+          ) : (
+            <div className="overflow-x-auto rounded-lg border border-gray-200">
+              <table className="min-w-full text-sm">
+                <thead className="bg-gray-100 text-gray-700">
+                  <tr>
+                    <th className="text-left px-3 py-2 font-medium whitespace-nowrap">Test Case ID</th>
+                    <th className="text-left px-3 py-2 font-medium">Title</th>
+                    <th className="text-left px-3 py-2 font-medium min-w-[220px]">Objective</th>
+                    <th className="text-left px-3 py-2 font-medium min-w-[180px]">Pass/Fail Criteria</th>
+                    <th className="text-left px-3 py-2 font-medium whitespace-nowrap">Priority</th>
+                    <th className="text-left px-3 py-2 font-medium whitespace-nowrap">Status</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-gray-100 bg-white">
+                  {matched.map((tc) => (
+                    <tr key={tc.testCaseId}>
+                      <td className="px-3 py-2 font-mono text-xs text-gray-800 whitespace-nowrap align-top">
+                        {tc.testCaseId}
+                      </td>
+                      <td className="px-3 py-2 text-gray-800 align-top">{tc.title}</td>
+                      <td className="px-3 py-2 text-gray-600 align-top whitespace-pre-wrap">{tc.objective}</td>
+                      <td className="px-3 py-2 text-gray-600 align-top whitespace-pre-wrap">{tc.passFailCriteria}</td>
+                      <td className="px-3 py-2 align-top whitespace-nowrap">
+                        <span
+                          className={
+                            "inline-block rounded-full px-2 py-0.5 text-xs font-medium " +
+                            (tc.priority === "High"
+                              ? "bg-red-100 text-red-700"
+                              : tc.priority === "Medium"
+                              ? "bg-amber-100 text-amber-700"
+                              : "bg-gray-100 text-gray-700")
+                          }
+                        >
+                          {tc.priority || "—"}
+                        </span>
+                      </td>
+                      <td className="px-3 py-2 align-top whitespace-nowrap">
+                        <span
+                          className={
+                            "inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-xs font-medium " +
+                            (tc.status === "Pass"
+                              ? "bg-green-100 text-green-700"
+                              : tc.status === "Fail"
+                              ? "bg-red-100 text-red-700"
+                              : "bg-gray-100 text-gray-600")
+                          }
+                        >
+                          {tc.status === "Pass" && <CheckCircle2 className="w-3 h-3" />}
+                          {tc.status || "—"}
+                        </span>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Number of Ports */}
+      <div>
+        <label className="block text-sm font-medium mb-2 text-gray-800">Number of Ports</label>
+        <input
+          type="number"
+          min={0}
+          value={numPorts}
+          onChange={(e) => handlePortCountChange(e.target.value)}
+          className="w-40 rounded-lg border border-gray-300 px-4 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+        />
+      </div>
+
+      {/* Dynamic Ports */}
+      {ports.map((port, index) => (
+        <div key={index}>
+          <label className="block text-sm font-medium mb-2 text-gray-800">
+            Input Port Name {index + 1}
+          </label>
+          <input
+            type="text"
+            value={port.key}
+            onChange={(e) => handlePortChange(index, "key", e.target.value)}
+            className="w-full rounded-lg border border-gray-300 px-4 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+          />
+        </div>
+      ))}
+
+      <div>
+        <button
+          type="button"
+          onClick={handleGenerate}
+          disabled={isGenerating}
+          className="rounded-lg bg-blue-600 px-6 py-2 text-white hover:bg-blue-700 disabled:opacity-50"
+        >
+          {isGenerating ? "Generating…" : "Generate Testcase"}
+        </button>
+
+        {generateError && <p className="mt-2 text-sm text-red-600">{generateError}</p>}
+        {generateSuccess && <p className="mt-2 text-sm text-green-600">{generateSuccess}</p>}
+      </div>
     </div>
   );
 }
