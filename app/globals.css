@@ -1,1 +1,139 @@
 @import "tailwindcss";
+/* Tailwind v3 project? Replace the line above with:
+   @tailwind base;
+   @tailwind components;
+   @tailwind utilities;
+*/
+
+/* ============================================================
+   THEME REMAP
+   Your JSX already uses Tailwind's default palette classes
+   (text-gray-800, bg-gray-100, border-gray-300, bg-blue-600,
+   bg-red-100/text-red-700, etc). Instead of hunting down every
+   className, this redefines what those tokens MEAN for this
+   project — so every existing class repaints itself in the navy
+   theme automatically. Nothing in page.tsx needs to change.
+   ============================================================ */
+@theme {
+  /* Gray → navy-tinted surfaces + light text.
+     (50/100/200/300 = surfaces & borders, 400-800 = text/icons,
+     reassigned for a dark UI even though the numbers still run
+     light→dark in Tailwind's naming convention.) */
+  --color-gray-50:  #110b53;   /* subtle raised bg: dropzone hover, file-row */
+  --color-gray-100: #1c1670;   /* table header bg, low-priority/pending badge bg */
+  --color-gray-200: #2a2290;   /* table border */
+  --color-gray-300: #362cab;   /* input borders, dropzone border */
+  --color-gray-400: #8d87c9;   /* muted icons */
+  --color-gray-500: #a49ed9;   /* secondary/muted text */
+  --color-gray-600: #c8c3ee;   /* body text: objective, criteria cells */
+  --color-gray-700: #e5e2fb;   /* table header text */
+  --color-gray-800: #f6f4ff;   /* primary labels & headings */
+  --color-gray-900: #ffffff;
+
+  /* Blue → single violet-blue accent used across buttons, links, focus */
+  --color-blue-50:  #191270;
+  --color-blue-400: #958dff;
+  --color-blue-500: #6c63ff;
+  --color-blue-600: #6c63ff;
+  --color-blue-700: #5147e6;
+
+  /* Status colors: dark muted surface + light legible text on top */
+  --color-red-100:   #3a1620;
+  --color-red-600:   #ff8a94;
+  --color-red-700:   #ff8a94;
+  --color-amber-100: #3a2a10;
+  --color-amber-700: #ffcf7a;
+  --color-green-100: #12362a;
+  --color-green-600: #6ee7b0;
+  --color-green-700: #6ee7b0;
+}
+
+/* ============================================================
+   BASE
+   ============================================================ */
+html {
+  color-scheme: dark;
+}
+
+body {
+  background:
+    radial-gradient(1100px 550px at 8% -8%, rgba(108, 99, 255, 0.10), transparent 55%),
+    #03002e;
+  color: #f6f4ff;
+  font-feature-settings: "cv11", "ss01";
+  -webkit-font-smoothing: antialiased;
+  min-height: 100vh;
+}
+
+::selection {
+  background: #5147e6;
+  color: #fff;
+}
+
+* {
+  scrollbar-width: thin;
+  scrollbar-color: #2a2290 transparent;
+}
+*::-webkit-scrollbar { width: 10px; height: 10px; }
+*::-webkit-scrollbar-thumb {
+  background: #2a2290;
+  border-radius: 999px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+*::-webkit-scrollbar-thumb:hover { background: #362cab; background-clip: padding-box; }
+
+:focus-visible {
+  outline: 2px solid #958dff;
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.001ms !important;
+    transition-duration: 0.001ms !important;
+  }
+}
+
+/* Small elegance pass on the three field labels (Model Name,
+   Testcase Workbook, Requirement ID) — adds spacing only;
+   the color still comes from their existing text-gray-800 class. */
+label {
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  font-size: 0.7rem !important;
+}
+
+/* ============================================================
+   TARGETED OVERRIDES
+   These are plain (unlayered) rules, so they win over Tailwind's
+   generated utilities regardless of load order — used only for
+   the couple of literal "white" backgrounds in the current markup
+   (e.g. the results table body) that the palette remap above
+   can't reach, since "white" isn't part of the gray scale.
+   ============================================================ */
+.bg-white {
+  background-color: #150f5e;
+}
+
+input {
+  background-color: #0a0742;
+}
+
+/* Table polish: soft header/body separation + row hover */
+table thead tr {
+  border-bottom: 1px solid #2a2290;
+}
+table tbody tr:hover {
+  background-color: #1c1670;
+}
+table td, table th {
+  border-color: #241d80 !important;
+}
+
+/* Priority / status chips (rounded-full pills) get a hairline
+   border, since dark-on-dark chips lose their edge without one. */
+.rounded-full {
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}

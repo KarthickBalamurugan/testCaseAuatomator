@@ -19,7 +19,7 @@ const FIELD_ORDER = [
   "notes",
 ];
 
-function parseWorkbook(arrayBuffer) {
+function parseWorkbook(arrayBuffer : ArrayBuffer) {
   const wb = XLSX.read(arrayBuffer, { type: "array" });
   const testCases = [];
 
@@ -86,7 +86,6 @@ export default function TestRequirementForm() {
         setFileName("");
         return;
       }
-      console.log(testCases)
       setAllTestCases(testCases);
       setFileName(file.name);
     } catch (err) {
