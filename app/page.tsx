@@ -3,6 +3,7 @@
 import { useState } from "react";
 import * as XLSX from "xlsx";
 import { Upload, FileSpreadsheet, Search, X, CheckCircle2 } from "lucide-react";
+import Navbar from "./components/Navbar";
 
 // Column layout used across the testcase sheets in this workbook:
 // [Test case ID, Requirement ID, Title, Objective, Preconditions, ts (s), Pass/Fail Criteria, Priority, Status, Notes]
@@ -204,45 +205,49 @@ export default function TestRequirementForm() {
   };
 
   return (
-    <div className="max-w-3xl mx-auto p-6 space-y-6">
+    <div className="min-h-screen bg-transparent">
+      <Navbar />
+
+      <main className="mx-auto max-w-4xl px-6 py-8 sm:px-8 lg:px-10">
+        <div className="space-y-6 rounded-[28px] border border-slate-200/80 bg-white/90 p-6 shadow-[0_20px_60px_rgba(15,23,42,0.08)] backdrop-blur-sm sm:p-8">
       {/* Model Name */}
       <div>
-        <label className="block text-sm font-medium mb-2 text-gray-800">Model Name</label>
+        <label className="mb-2 block text-sm font-semibold text-slate-700">Model Name</label>
         <input
           type="text"
           value={modelName}
           onChange={(e) => setModelName(e.target.value)}
-          className="w-full rounded-lg border border-gray-300 px-4 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+          className="w-full rounded-xl border border-slate-200 bg-slate-50 px-4 py-2.5 text-slate-800 shadow-sm transition focus:border-blue-600 focus:bg-white focus:outline-none focus:ring-2 focus:ring-blue-100"
         />
       </div>
 
       {/* Excel Upload */}
       <div>
-        <label className="block text-sm font-medium mb-2 text-gray-800">Testcase Workbook</label>
+        <label className="mb-2 block text-sm font-semibold text-slate-700">Testcase Workbook</label>
 
         {!fileName ? (
-          <label className="flex flex-col items-center justify-center gap-2 w-full rounded-lg border-2 border-dashed border-gray-300 px-4 py-8 cursor-pointer hover:border-blue-400 hover:bg-blue-50/40 transition-colors">
-            <Upload className="w-6 h-6 text-gray-400" />
-            <span className="text-sm text-gray-600">
-              <span className="text-blue-600 font-medium">Click to upload</span> an .xlsx testcase file
+          <label className="flex w-full cursor-pointer flex-col items-center justify-center gap-2 rounded-2xl border border-dashed border-slate-300 bg-slate-50 px-4 py-8 text-center transition hover:border-blue-500 hover:bg-blue-50/40">
+            <Upload className="h-6 w-6 text-slate-400" />
+            <span className="text-sm text-slate-600">
+              <span className="font-semibold text-blue-700">Click to upload</span> an .xlsx testcase file
             </span>
             <input type="file" accept=".xlsx,.xls" onChange={handleFileUpload} className="hidden" />
           </label>
         ) : (
-          <div className="flex items-center justify-between rounded-lg border border-gray-300 px-4 py-3 bg-gray-50">
-            <div className="flex items-center gap-2 min-w-0">
-              <FileSpreadsheet className="w-5 h-5 text-green-600 shrink-0" />
-              <span className="text-sm text-gray-800 truncate">{fileName}</span>
-              <span className="text-xs text-gray-500 shrink-0">
+          <div className="flex items-center justify-between rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3">
+            <div className="flex min-w-0 items-center gap-2">
+              <FileSpreadsheet className="h-5 w-5 shrink-0 text-blue-700" />
+              <span className="truncate text-sm text-slate-800">{fileName}</span>
+              <span className="shrink-0 text-xs text-slate-500">
                 ({allTestCases.length} testcase{allTestCases.length === 1 ? "" : "s"} found)
               </span>
             </div>
             <button
               type="button"
               onClick={clearFile}
-              className="text-gray-400 hover:text-gray-600 shrink-0 ml-2"
+              className="ml-2 shrink-0 text-slate-400 hover:text-slate-600"
             >
-              <X className="w-4 h-4" />
+              <X className="h-4 w-4" />
             </button>
           </div>
         )}
@@ -253,15 +258,15 @@ export default function TestRequirementForm() {
       {/* Requirement ID lookup */}
       {fileName && !parseError && (
         <div>
-          <label className="block text-sm font-medium mb-2 text-gray-800">Requirement ID</label>
+          <label className="mb-2 block text-sm font-semibold text-slate-700">Requirement ID</label>
           <div className="relative">
-            <Search className="w-4 h-4 text-gray-400 absolute left-3 top-1/2 -translate-y-1/2" />
+            <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
             <input
               type="text"
               value={reqId}
               onChange={(e) => handleReqIdChange(e.target.value)}
               placeholder="e.g. REQ-IB_BHMS-SC-PSB-002"
-              className="w-full rounded-lg border border-gray-300 pl-9 pr-4 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+              className="w-full rounded-xl border border-slate-200 bg-slate-50 pl-9 pr-4 py-2.5 text-slate-800 shadow-sm transition focus:border-blue-600 focus:bg-white focus:outline-none focus:ring-2 focus:ring-blue-100"
             />
           </div>
         </div>
@@ -275,9 +280,9 @@ export default function TestRequirementForm() {
               No testcases found for "{reqId}". Check the requirement ID and try again.
             </p>
           ) : (
-            <div className="overflow-x-auto rounded-lg border border-gray-200">
+            <div className="overflow-x-auto rounded-2xl border border-slate-200">
               <table className="min-w-full text-sm">
-                <thead className="bg-gray-100 text-gray-700">
+                <thead className="bg-slate-50 text-slate-700">
                   <tr>
                     <th className="text-left px-3 py-2 font-medium whitespace-nowrap">Test Case ID</th>
                     <th className="text-left px-3 py-2 font-medium">Title</th>
@@ -287,7 +292,7 @@ export default function TestRequirementForm() {
                     <th className="text-left px-3 py-2 font-medium whitespace-nowrap">Status</th>
                   </tr>
                 </thead>
-                <tbody className="divide-y divide-gray-100 bg-white">
+                <tbody className="divide-y divide-slate-100 bg-white">
                   {matched.map((tc) => (
                     <tr key={tc.testCaseId}>
                       <td className="px-3 py-2 font-mono text-xs text-gray-800 whitespace-nowrap align-top">
@@ -336,27 +341,27 @@ export default function TestRequirementForm() {
 
       {/* Number of Ports */}
       <div>
-        <label className="block text-sm font-medium mb-2 text-gray-800">Number of Ports</label>
+        <label className="mb-2 block text-sm font-semibold text-slate-700">Number of Ports</label>
         <input
           type="number"
           min={0}
           value={numPorts}
           onChange={(e) => handlePortCountChange(e.target.value)}
-          className="w-40 rounded-lg border border-gray-300 px-4 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+          className="w-40 rounded-xl border border-slate-200 bg-slate-50 px-4 py-2.5 text-slate-800 shadow-sm transition focus:border-blue-600 focus:bg-white focus:outline-none focus:ring-2 focus:ring-blue-100"
         />
       </div>
 
       {/* Dynamic Ports */}
       {ports.map((port, index) => (
         <div key={index}>
-          <label className="block text-sm font-medium mb-2 text-gray-800">
+          <label className="mb-2 block text-sm font-semibold text-slate-700">
             Input Port Name {index + 1}
           </label>
           <input
             type="text"
             value={port.key}
             onChange={(e) => handlePortChange(index, "key", e.target.value)}
-            className="w-full rounded-lg border border-gray-300 px-4 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+            className="w-full rounded-xl border border-slate-200 bg-slate-50 px-4 py-2.5 text-slate-800 shadow-sm transition focus:border-blue-600 focus:bg-white focus:outline-none focus:ring-2 focus:ring-blue-100"
           />
         </div>
       ))}
@@ -366,7 +371,7 @@ export default function TestRequirementForm() {
           type="button"
           onClick={handleGenerate}
           disabled={isGenerating}
-          className="rounded-lg bg-blue-600 px-6 py-2 text-white hover:bg-blue-700 disabled:opacity-50"
+          className="rounded-xl bg-blue-700 px-6 py-2.5 text-white shadow-sm transition hover:bg-blue-800 disabled:opacity-50"
         >
           {isGenerating ? "Generating…" : "Generate Testcase"}
         </button>
@@ -374,6 +379,8 @@ export default function TestRequirementForm() {
         {generateError && <p className="mt-2 text-sm text-red-600">{generateError}</p>}
         {generateSuccess && <p className="mt-2 text-sm text-green-600">{generateSuccess}</p>}
       </div>
+        </div>
+      </main>
     </div>
   );
 }
