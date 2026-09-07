@@ -1,33 +1,69 @@
+"use client";
+
 import Image from "next/image";
+import Link from "next/link";
+import { usePathname } from "next/navigation";
+import { ScanText } from "lucide-react";
+
+const navLinks = [
+  { href: "/", label: "Home" },
+  { href: "/parser", label: "Parser" },
+];
 
 export default function Navbar() {
+  const pathname = usePathname();
+
   return (
-    <header className="border-b border-slate-200/80 bg-white/80 backdrop-blur-xl">
-      <div className="mx-auto flex max-w-6xl items-center justify-between px-6 py-5 sm:px-8">
-        <div className="flex items-center gap-4">
-          <div className="flex h-14 w-14 items-center justify-center overflow-hidden rounded-2xl border border-slate-200 bg-gradient-to-br from-slate-50 to-blue-50 shadow-[0_8px_24px_rgba(15,23,42,0.08)]">
+    <header className="sticky top-0 z-30 border-b border-slate-800 bg-slate-950/80 backdrop-blur-md">
+      <div className="mx-auto flex h-14 max-w-7xl items-center justify-between px-4 sm:px-6">
+        <div className="flex items-center gap-3">
+          <div className="flex h-8 w-8 items-center justify-center overflow-hidden rounded-lg border border-slate-700 bg-slate-900">
             <Image
               src="/TSF.jpg"
-              alt="TSF logo"
-              width={56}
-              height={56}
+              alt="Logo"
+              width={32}
+              height={32}
               className="h-full w-full object-cover"
             />
           </div>
-
-          <div className="flex flex-col leading-tight">
-            <p className="text-[1.02rem] font-semibold uppercase tracking-[0.32em] text-slate-900 sm:text-[1.18rem]">
-              Electronic Stability Control
-            </p>
-            <p className="text-sm font-medium uppercase tracking-[0.28em] text-blue-700 sm:text-base">
-              Testcase Automator
-            </p>
+          <div className="flex items-baseline gap-2">
+            <span className="text-sm font-semibold text-white tracking-tight">
+              ESC Testcase Automator
+            </span>
+            <span className="text-xs text-slate-500 hidden sm:inline">
+            </span>
           </div>
         </div>
 
-        {/* <div className="hidden rounded-full border border-blue-100 bg-blue-50/70 px-3 py-1.5 text-xs font-semibold uppercase tracking-[0.24em] text-blue-700 sm:block">
-          Automation Suite
-        </div> */}
+        <nav className="flex items-center gap-1">
+          {navLinks.map((link) => {
+            const isActive =
+              link.href === "/"
+                ? pathname === "/"
+                : pathname.startsWith(link.href);
+            return (
+              <Link
+                key={link.href}
+                href={link.href}
+                className={`flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-sm font-medium transition ${
+                  isActive
+                    ? "bg-slate-800 text-white"
+                    : "text-slate-400 hover:bg-slate-800/60 hover:text-slate-200"
+                }`}
+              >
+                {link.href === "/parser" && (
+                  <ScanText className="h-4 w-4" />
+                )}
+                {link.label}
+              </Link>
+            );
+          })}
+        </nav>
+
+        <div className="flex items-center gap-2">
+          <span className="flex h-2 w-2 rounded-full bg-emerald-500" />
+          <span className="text-xs text-slate-400 font-medium">Ready</span>
+        </div>
       </div>
     </header>
   );

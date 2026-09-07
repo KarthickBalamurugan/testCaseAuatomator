@@ -1,12 +1,21 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useMemo, ChangeEvent, DragEvent } from "react";
 import * as XLSX from "xlsx";
-import { Upload, FileSpreadsheet, Search, X, CheckCircle2 } from "lucide-react";
+import {
+  Upload,
+  FileSpreadsheet,
+  Search,
+  X,
+  CheckCircle2,
+  AlertCircle,
+  Download,
+  Check,
+  Plus,
+  Minus,
+} from "lucide-react";
 import Navbar from "./components/Navbar";
 
-// Column layout used across the testcase sheets in this workbook:
-// [Test case ID, Requirement ID, Title, Objective, Preconditions, ts (s), Pass/Fail Criteria, Priority, Status, Notes]
 const FIELD_ORDER = [
   "testCaseId",
   "requirementId",
@@ -18,83 +27,129 @@ const FIELD_ORDER = [
   "priority",
   "status",
   "notes",
-];
+] as const;
 
-function parseWorkbook(arrayBuffer : ArrayBuffer) {
+export interface ParsedTestCase {
+  sheet: string;
+  testCaseId: string;
+  requirementId: string;
+  title: string;
+  objective: string;
+  preconditions: string;
+  ts: string;
+  passFailCriteria: string;
+  priority: string;
+  status: string;
+  notes: string;
+  [key: string]: string;
+}
+
+export interface BusPort {
+  name: string;
+}
+
+export interface BusConfig {
+  portCount: string | number;
+  ports: BusPort[];
+}
+
+function parseWorkbook(arrayBuffer: ArrayBuffer): ParsedTestCase[] {
   const wb = XLSX.read(arrayBuffer, { type: "array" });
-  const testCases = [];
+  const testCases: ParsedTestCase[] = [];
 
   wb.SheetNames.forEach((sheetName) => {
     const sheet = wb.Sheets[sheetName];
-    const rows = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: null });
+    const rows = XLSX.utils.sheet_to_json<unknown[]>(sheet, { header: 1, defval: null });
     if (!rows || rows.length < 2) return;
 
-    // Only treat sheets that look like testcase tables (first cell of header is "Test case ID")
-    const header = rows[0];
-    if (!header || typeof header[0] !== "string" || !header[0].toLowerCase().includes("test case id")) {
+    const header = rows[0] as unknown[];
+    if (
+      !header ||
+      typeof header[0] !== "string" ||
+      !header[0].toLowerCase().includes("test case id")
+    ) {
       return;
     }
 
     for (let i = 1; i < rows.length; i++) {
-      const row = rows[i];
+      const row = rows[i] as unknown[];
       if (!row || row.length === 0) continue;
       const tcId = row[0];
-      // Skip requirement-header grouping rows (e.g. "REQ-..." with nothing else on the row)
       if (typeof tcId !== "string" || !tcId.toUpperCase().startsWith("TC-")) continue;
 
-      const entry = { sheet: sheetName };
+      const entry: Record<string, string> = { sheet: sheetName };
       FIELD_ORDER.forEach((key, idx) => {
         entry[key] = row[idx] !== undefined && row[idx] !== null ? String(row[idx]) : "";
       });
-      console.log("Parsing row:", entry);
-      testCases.push(entry);
+      testCases.push(entry as unknown as ParsedTestCase);
     }
   });
 
   return testCases;
 }
 
-export default function TestRequirementForm() {
-  const [modelName, setModelName] = useState("");
-  const [fileName, setFileName] = useState("");
-  const [allTestCases, setAllTestCases] = useState([]);
-  const [parseError, setParseError] = useState("");
-  const [numPorts, setNumPorts] = useState(0);
-  const [ports, setPorts] = useState([]);
-  const [reqId, setReqId] = useState("");
-  const [matched, setMatched] = useState(null); // null = not searched yet
+const inputCls =
+  "w-full rounded-lg border border-slate-700 bg-slate-800 px-3 py-2 text-sm text-slate-100 font-mono placeholder:text-slate-500 transition focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500/50";
 
-  // --- Generation state ---
+export default function TestRequirementForm() {
+  const [modelName, setModelName] = useState("ESC_Stability_Controller");
+  const [fileName, setFileName] = useState("");
+  const [allTestCases, setAllTestCases] = useState<ParsedTestCase[]>([]);
+  const [parseError, setParseError] = useState("");
+  const [numBuses, setNumBuses] = useState("");
+  const [buses, setBuses] = useState<BusConfig[]>([]);
+  const [reqId, setReqId] = useState("");
+  const [matched, setMatched] = useState<ParsedTestCase[] | null>(null);
   const [isGenerating, setIsGenerating] = useState(false);
   const [generateError, setGenerateError] = useState("");
   const [generateSuccess, setGenerateSuccess] = useState("");
+  const [isDraggingOver, setIsDraggingOver] = useState(false);
 
-  const handleFileUpload = async (e) => {
-    const file = e.target.files?.[0];
+  const uniqueReqIds = useMemo(() => {
+    const ids = new Set<string>();
+    allTestCases.forEach((tc) => {
+      const id = tc.requirementId.trim();
+      if (id) ids.add(id);
+    });
+    return Array.from(ids);
+  }, [allTestCases]);
+
+  const handleFileUpload = async (file?: File) => {
     if (!file) return;
     setParseError("");
     setMatched(null);
     setReqId("");
     setGenerateError("");
     setGenerateSuccess("");
+    setNumBuses("");
+    setBuses([]);
 
     try {
       const buffer = await file.arrayBuffer();
       const testCases = parseWorkbook(buffer);
       if (testCases.length === 0) {
-        setParseError("No testcases found in this file. Check that it has a 'Test case ID' column.");
+        setParseError("No testcases found. Make sure the file has a 'Test case ID' column.");
         setAllTestCases([]);
         setFileName("");
         return;
       }
       setAllTestCases(testCases);
       setFileName(file.name);
-    } catch (err) {
-      console.error(err);
-      setParseError("Couldn't read that file. Make sure it's a valid .xlsx workbook.");
+    } catch {
+      setParseError("Could not read this file. Is it a valid .xlsx?");
       setAllTestCases([]);
       setFileName("");
     }
+  };
+
+  const handleFileInputChange = (e: ChangeEvent<HTMLInputElement>) => {
+    handleFileUpload(e.target.files?.[0]);
+  };
+
+  const handleDrop = (e: DragEvent<HTMLLabelElement>) => {
+    e.preventDefault();
+    setIsDraggingOver(false);
+    handleFileUpload(e.dataTransfer.files?.[0]);
   };
 
   const clearFile = () => {
@@ -105,9 +160,11 @@ export default function TestRequirementForm() {
     setParseError("");
     setGenerateError("");
     setGenerateSuccess("");
+    setNumBuses("");
+    setBuses([]);
   };
 
-  const handleReqIdChange = (value) => {
+  const handleReqIdChange = (value: string) => {
     setReqId(value);
     setGenerateError("");
     setGenerateSuccess("");
@@ -119,17 +176,16 @@ export default function TestRequirementForm() {
     const results = allTestCases.filter(
       (tc) => tc.requirementId.trim().toLowerCase() === trimmed
     );
-    console.log(results)
     setMatched(results);
   };
 
-  const handlePortCountChange = (value) => {
-    const n = Number(value);
-    setNumPorts(n);
-    setPorts((prev) => {
+  const handleBusCountChange = (value: string) => {
+    setNumBuses(value);
+    const n = value === "" ? 0 : Math.max(0, parseInt(value, 10) || 0);
+    setBuses((prev) => {
       const updated = [...prev];
       if (n > updated.length) {
-        while (updated.length < n) updated.push({ key: "", value: "" });
+        while (updated.length < n) updated.push({ portCount: "", ports: [] });
       } else {
         updated.splice(n);
       }
@@ -137,10 +193,31 @@ export default function TestRequirementForm() {
     });
   };
 
-  const handlePortChange = (index, field, value) => {
-    const updated = [...ports];
-    updated[index][field] = value;
-    setPorts(updated);
+  const handleBusPortCountChange = (busIndex: number, value: string) => {
+    const n = value === "" ? 0 : Math.max(0, parseInt(value, 10) || 0);
+    setBuses((prev) => {
+      const updated = [...prev];
+      const currentBus = updated[busIndex] || { portCount: "", ports: [] };
+      const nextPorts = [...currentBus.ports];
+      if (n > nextPorts.length) {
+        while (nextPorts.length < n) nextPorts.push({ name: "" });
+      } else {
+        nextPorts.splice(n);
+      }
+      updated[busIndex] = { ...currentBus, portCount: value, ports: nextPorts };
+      return updated;
+    });
+  };
+
+  const handleBusPortChange = (busIndex: number, portIndex: number, value: string) => {
+    setBuses((prev) => {
+      const updated = [...prev];
+      const currentBus = updated[busIndex] || { portCount: 0, ports: [] };
+      const updatedPorts = [...currentBus.ports];
+      updatedPorts[portIndex] = { name: value };
+      updated[busIndex] = { ...currentBus, ports: updatedPorts };
+      return updated;
+    });
   };
 
   const handleGenerate = async () => {
@@ -148,15 +225,14 @@ export default function TestRequirementForm() {
     setGenerateSuccess("");
 
     if (!modelName.trim()) {
-      setGenerateError("Enter a model name first.");
+      setGenerateError("Enter a model name.");
       return;
     }
     if (!reqId.trim() || !matched || matched.length === 0) {
-      setGenerateError("Look up a requirement ID with matching testcases first.");
+      setGenerateError("Select a requirement ID with matching testcases.");
       return;
     }
 
-    // Build a requirement description from the matched testcase rows
     const requirementDescription = matched
       .map(
         (tc) =>
@@ -164,7 +240,8 @@ export default function TestRequirementForm() {
       )
       .join("\n");
 
-    const portNames = ports.map((p) => p.key.trim()).filter(Boolean);
+    const portNames = buses
+      .flatMap((bus) => bus.ports.map((port) => port.name.trim()).filter(Boolean));
 
     setIsGenerating(true);
     try {
@@ -189,196 +266,363 @@ export default function TestRequirementForm() {
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
-      a.download = `MBD_TestSuite_${reqId.trim()}.m`;
+      a.download = `MBD_TestSuite_${reqId.trim().replace(/[^a-zA-Z0-9._-]/g, "_")}.m`;
       document.body.appendChild(a);
       a.click();
       a.remove();
       URL.revokeObjectURL(url);
 
-      setGenerateSuccess("Test suite generated and downloaded successfully.");
-    } catch (err) {
-      console.error(err);
-      setGenerateError(err.message || "Something went wrong generating the test suite.");
+      setGenerateSuccess(`Downloaded: MBD_TestSuite_${reqId.trim()}.m`);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : "Generation failed.";
+      setGenerateError(msg);
     } finally {
       setIsGenerating(false);
     }
   };
 
+  const hasFile = !!fileName && !parseError;
+  const canSearch = hasFile;
+
   return (
-    <div className="min-h-screen bg-transparent">
+    <div className="min-h-[100dvh] bg-[#0b0f19] text-slate-100 flex flex-col">
       <Navbar />
 
-      <main className="mx-auto max-w-4xl px-6 py-8 sm:px-8 lg:px-10">
-        <div className="space-y-6 rounded-[28px] border border-slate-200/80 bg-white/90 p-6 shadow-[0_20px_60px_rgba(15,23,42,0.08)] backdrop-blur-sm sm:p-8">
-      {/* Model Name */}
-      <div>
-        <label className="mb-2 block text-sm font-semibold text-slate-700">Model Name</label>
-        <input
-          type="text"
-          value={modelName}
-          onChange={(e) => setModelName(e.target.value)}
-          className="w-full rounded-xl border border-slate-200 bg-slate-50 px-4 py-2.5 text-slate-800 shadow-sm transition focus:border-blue-600 focus:bg-white focus:outline-none focus:ring-2 focus:ring-blue-100"
-        />
-      </div>
+      <main className="flex-1 mx-auto w-full max-w-6xl px-4 py-6 sm:px-6 lg:px-8">
+        <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
+          {/* Left: Config */}
+          <div className="lg:col-span-7 space-y-4">
+            {/* Top bar: model name + upload */}
+            <div className="rounded-xl border border-slate-800 bg-slate-900/60 p-4">
+              <div className="flex flex-col sm:flex-row gap-3">
+                <div className="flex-1">
+                  <label className="text-[11px] font-medium uppercase tracking-wider text-slate-400 mb-1.5 block">
+                    Model Name
+                  </label>
+                  <input
+                    type="text"
+                    value={modelName}
+                    onChange={(e) => setModelName(e.target.value)}
+                    placeholder="e.g. ESC_System_Controller"
+                    className={inputCls}
+                  />
+                </div>
+                <div className="flex-1">
+                  <label className="text-[11px] font-medium uppercase tracking-wider text-slate-400 mb-1.5 block">
+                    Workbook
+                  </label>
+                  {!fileName ? (
+                    <label
+                      onDrop={handleDrop}
+                      onDragOver={(e) => {
+                        e.preventDefault();
+                        setIsDraggingOver(true);
+                      }}
+                      onDragLeave={(e) => {
+                        e.preventDefault();
+                        setIsDraggingOver(false);
+                      }}
+                      className={`flex items-center gap-2.5 rounded-lg border-2 border-dashed px-3 py-2 cursor-pointer transition-all text-sm ${
+                        isDraggingOver
+                          ? "border-blue-500 bg-blue-500/10"
+                          : "border-slate-700 bg-slate-800 hover:border-slate-600"
+                      }`}
+                    >
+                      <Upload className="h-4 w-4 text-slate-400 shrink-0" />
+                      <span className="text-slate-300 truncate">Drop .xlsx or click</span>
+                      <input
+                        type="file"
+                        accept=".xlsx,.xls"
+                        onChange={handleFileInputChange}
+                        className="hidden"
+                      />
+                    </label>
+                  ) : (
+                    <div className="flex items-center gap-2 rounded-lg border border-blue-500/30 bg-blue-500/10 px-3 py-2">
+                      <FileSpreadsheet className="h-4 w-4 text-blue-400 shrink-0" />
+                      <span className="text-sm text-blue-300 truncate flex-1">{fileName}</span>
+                      <span className="text-xs text-emerald-400 font-mono shrink-0">
+                        {allTestCases.length} tc
+                      </span>
+                      <button
+                        onClick={clearFile}
+                        className="text-slate-400 hover:text-white transition shrink-0"
+                      >
+                        <X className="h-3.5 w-3.5" />
+                      </button>
+                    </div>
+                  )}
+                </div>
+              </div>
 
-      {/* Excel Upload */}
-      <div>
-        <label className="mb-2 block text-sm font-semibold text-slate-700">Testcase Workbook</label>
-
-        {!fileName ? (
-          <label className="flex w-full cursor-pointer flex-col items-center justify-center gap-2 rounded-2xl border border-dashed border-slate-300 bg-slate-50 px-4 py-8 text-center transition hover:border-blue-500 hover:bg-blue-50/40">
-            <Upload className="h-6 w-6 text-slate-400" />
-            <span className="text-sm text-slate-600">
-              <span className="font-semibold text-blue-700">Click to upload</span> an .xlsx testcase file
-            </span>
-            <input type="file" accept=".xlsx,.xls" onChange={handleFileUpload} className="hidden" />
-          </label>
-        ) : (
-          <div className="flex items-center justify-between rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3">
-            <div className="flex min-w-0 items-center gap-2">
-              <FileSpreadsheet className="h-5 w-5 shrink-0 text-blue-700" />
-              <span className="truncate text-sm text-slate-800">{fileName}</span>
-              <span className="shrink-0 text-xs text-slate-500">
-                ({allTestCases.length} testcase{allTestCases.length === 1 ? "" : "s"} found)
-              </span>
+              {parseError && (
+                <div className="mt-2 flex items-center gap-1.5 text-xs text-red-400">
+                  <AlertCircle className="h-3.5 w-3.5" />
+                  {parseError}
+                </div>
+              )}
             </div>
-            <button
-              type="button"
-              onClick={clearFile}
-              className="ml-2 shrink-0 text-slate-400 hover:text-slate-600"
-            >
-              <X className="h-4 w-4" />
-            </button>
-          </div>
-        )}
 
-        {parseError && <p className="mt-2 text-sm text-red-600">{parseError}</p>}
-      </div>
+            {/* Requirement search + chips */}
+            {canSearch && (
+              <div className="rounded-xl border border-slate-800 bg-slate-900/60 p-4">
+                <label className="text-[11px] font-medium uppercase tracking-wider text-slate-400 mb-1.5 block">
+                  Requirement ID
+                </label>
+                <div className="relative mb-3">
+                  <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-slate-500" />
+                  <input
+                    type="text"
+                    value={reqId}
+                    onChange={(e) => handleReqIdChange(e.target.value)}
+                    placeholder="REQ-IB_BHMS-SC-PSB-002"
+                    className={inputCls + " pl-9 pr-8"}
+                  />
+                  {reqId && (
+                    <button
+                      onClick={() => handleReqIdChange("")}
+                      className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-500 hover:text-white transition"
+                    >
+                      <X className="h-3.5 w-3.5" />
+                    </button>
+                  )}
+                </div>
 
-      {/* Requirement ID lookup */}
-      {fileName && !parseError && (
-        <div>
-          <label className="mb-2 block text-sm font-semibold text-slate-700">Requirement ID</label>
-          <div className="relative">
-            <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
-            <input
-              type="text"
-              value={reqId}
-              onChange={(e) => handleReqIdChange(e.target.value)}
-              placeholder="e.g. REQ-IB_BHMS-SC-PSB-002"
-              className="w-full rounded-xl border border-slate-200 bg-slate-50 pl-9 pr-4 py-2.5 text-slate-800 shadow-sm transition focus:border-blue-600 focus:bg-white focus:outline-none focus:ring-2 focus:ring-blue-100"
-            />
-          </div>
-        </div>
-      )}
+                {uniqueReqIds.length > 0 && (
+                  <div className="flex flex-wrap gap-1 max-h-24 overflow-y-auto">
+                    {uniqueReqIds.map((id) => (
+                      <button
+                        key={id}
+                        onClick={() => handleReqIdChange(id)}
+                        className={`rounded-md px-2 py-0.5 text-xs font-mono transition-all ${
+                          reqId.trim().toLowerCase() === id.toLowerCase()
+                            ? "bg-blue-600 text-white"
+                            : "bg-slate-800 text-slate-400 hover:bg-slate-700 hover:text-slate-200"
+                        }`}
+                      >
+                        {id}
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
 
-      {/* Preview table */}
-      {matched !== null && (
-        <div>
-          {matched.length === 0 ? (
-            <p className="text-sm text-gray-500 italic">
-              No testcases found for "{reqId}". Check the requirement ID and try again.
-            </p>
-          ) : (
-            <div className="overflow-x-auto rounded-2xl border border-slate-200">
-              <table className="min-w-full text-sm">
-                <thead className="bg-slate-50 text-slate-700">
-                  <tr>
-                    <th className="text-left px-3 py-2 font-medium whitespace-nowrap">Test Case ID</th>
-                    <th className="text-left px-3 py-2 font-medium">Title</th>
-                    <th className="text-left px-3 py-2 font-medium min-w-[220px]">Objective</th>
-                    <th className="text-left px-3 py-2 font-medium min-w-[180px]">Pass/Fail Criteria</th>
-                    <th className="text-left px-3 py-2 font-medium whitespace-nowrap">Priority</th>
-                    <th className="text-left px-3 py-2 font-medium whitespace-nowrap">Status</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-100 bg-white">
-                  {matched.map((tc) => (
-                    <tr key={tc.testCaseId}>
-                      <td className="px-3 py-2 font-mono text-xs text-gray-800 whitespace-nowrap align-top">
-                        {tc.testCaseId}
-                      </td>
-                      <td className="px-3 py-2 text-gray-800 align-top">{tc.title}</td>
-                      <td className="px-3 py-2 text-gray-600 align-top whitespace-pre-wrap">{tc.objective}</td>
-                      <td className="px-3 py-2 text-gray-600 align-top whitespace-pre-wrap">{tc.passFailCriteria}</td>
-                      <td className="px-3 py-2 align-top whitespace-nowrap">
-                        <span
-                          className={
-                            "inline-block rounded-full px-2 py-0.5 text-xs font-medium " +
-                            (tc.priority === "High"
-                              ? "bg-red-100 text-red-700"
-                              : tc.priority === "Medium"
-                              ? "bg-amber-100 text-amber-700"
-                              : "bg-gray-100 text-gray-700")
-                          }
-                        >
-                          {tc.priority || "—"}
-                        </span>
-                      </td>
-                      <td className="px-3 py-2 align-top whitespace-nowrap">
-                        <span
-                          className={
-                            "inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-xs font-medium " +
-                            (tc.status === "Pass"
-                              ? "bg-green-100 text-green-700"
-                              : tc.status === "Fail"
-                              ? "bg-red-100 text-red-700"
-                              : "bg-gray-100 text-gray-600")
-                          }
-                        >
-                          {tc.status === "Pass" && <CheckCircle2 className="w-3 h-3" />}
-                          {tc.status || "—"}
-                        </span>
-                      </td>
-                    </tr>
+            {/* Buses */}
+            <div className="rounded-xl border border-slate-800 bg-slate-900/60 p-4">
+              <div className="flex items-center justify-between mb-3">
+                <label className="text-[11px] font-medium uppercase tracking-wider text-slate-400">
+                  Simulink Inports (Buses)
+                </label>
+                <span className="text-xs text-slate-500 font-mono">
+                  {buses.length} bus{buses.length === 1 ? "" : "es"}
+                </span>
+              </div>
+
+              <div className="flex items-center gap-2 mb-3">
+                <input
+                  type="number"
+                  min={0}
+                  value={numBuses}
+                  onChange={(e) => handleBusCountChange(e.target.value)}
+                  placeholder="0"
+                  className={inputCls + " w-20"}
+                />
+                <button
+                  onClick={() =>
+                    handleBusCountChange(String(Math.max(0, (parseInt(numBuses, 10) || 0) - 1)))
+                  }
+                  className="h-8 w-8 flex items-center justify-center rounded-lg border border-slate-700 bg-slate-800 text-slate-300 hover:bg-slate-700 transition active:scale-95"
+                >
+                  <Minus className="h-3.5 w-3.5" />
+                </button>
+                <button
+                  onClick={() =>
+                    handleBusCountChange(String((parseInt(numBuses, 10) || 0) + 1))
+                  }
+                  className="h-8 w-8 flex items-center justify-center rounded-lg border border-slate-700 bg-slate-800 text-slate-300 hover:bg-slate-700 transition active:scale-95"
+                >
+                  <Plus className="h-3.5 w-3.5" />
+                </button>
+              </div>
+
+              {buses.length > 0 && (
+                <div className="space-y-3">
+                  {buses.map((bus, bi) => (
+                    <div key={bi} className="rounded-lg border border-slate-800 bg-slate-800/50 p-3">
+                      <div className="flex items-center gap-2 mb-2">
+                        <span className="h-1.5 w-1.5 rounded-full bg-blue-500" />
+                        <span className="text-xs font-medium text-slate-300">Bus {bi + 1}</span>
+                        <span className="text-slate-600 text-xs">·</span>
+                        <span className="text-[11px] text-slate-500">Ports:</span>
+                        <input
+                          type="number"
+                          min={0}
+                          value={bus.portCount ?? ""}
+                          onChange={(e) => handleBusPortCountChange(bi, e.target.value)}
+                          placeholder="0"
+                          className="w-14 rounded-md border border-slate-700 bg-slate-900 px-2 py-0.5 text-xs font-mono text-slate-200 text-center focus:border-blue-500 focus:outline-none"
+                        />
+                      </div>
+                      {bus.ports.length > 0 && (
+                        <div className="grid grid-cols-2 sm:grid-cols-3 gap-1.5">
+                          {bus.ports.map((port, pi) => (
+                            <input
+                              key={pi}
+                              type="text"
+                              value={port.name}
+                              onChange={(e) => handleBusPortChange(bi, pi, e.target.value)}
+                              placeholder={`Port ${pi + 1}`}
+                              className="rounded-md border border-slate-700/60 bg-slate-900/60 px-2 py-1 text-xs font-mono text-slate-200 placeholder:text-slate-600 focus:border-blue-500 focus:outline-none"
+                            />
+                          ))}
+                        </div>
+                      )}
+                    </div>
                   ))}
-                </tbody>
-              </table>
+                </div>
+              )}
             </div>
-          )}
-        </div>
-      )}
 
-      {/* Number of Ports */}
-      <div>
-        <label className="mb-2 block text-sm font-semibold text-slate-700">Number of Ports</label>
-        <input
-          type="number"
-          min={0}
-          value={numPorts}
-          onChange={(e) => handlePortCountChange(e.target.value)}
-          className="w-40 rounded-xl border border-slate-200 bg-slate-50 px-4 py-2.5 text-slate-800 shadow-sm transition focus:border-blue-600 focus:bg-white focus:outline-none focus:ring-2 focus:ring-blue-100"
-        />
-      </div>
+            {/* Generate */}
+            <div className="rounded-xl border border-slate-800 bg-slate-900/60 p-4">
+              <div className="flex items-center justify-between gap-3">
+                <div>
+                  <p className="text-sm font-medium text-slate-200">Generate Test Suite</p>
+                  <p className="text-xs text-slate-500">Downloads a .m MATLAB script</p>
+                </div>
+                <button
+                  onClick={handleGenerate}
+                  disabled={isGenerating}
+                  className="inline-flex items-center gap-2 rounded-lg bg-blue-600 hover:bg-blue-500 px-5 py-2.5 text-sm font-semibold text-white transition active:scale-[0.98] disabled:opacity-50 disabled:pointer-events-none shrink-0"
+                >
+                  {isGenerating ? (
+                    <>
+                      <div className="h-4 w-4 animate-spin rounded-full border-2 border-white border-t-transparent" />
+                      Generating...
+                    </>
+                  ) : (
+                    <>
+                      <Download className="h-4 w-4" />
+                      Generate
+                    </>
+                  )}
+                </button>
+              </div>
 
-      {/* Dynamic Ports */}
-      {ports.map((port, index) => (
-        <div key={index}>
-          <label className="mb-2 block text-sm font-semibold text-slate-700">
-            Input Port Name {index + 1}
-          </label>
-          <input
-            type="text"
-            value={port.key}
-            onChange={(e) => handlePortChange(index, "key", e.target.value)}
-            className="w-full rounded-xl border border-slate-200 bg-slate-50 px-4 py-2.5 text-slate-800 shadow-sm transition focus:border-blue-600 focus:bg-white focus:outline-none focus:ring-2 focus:ring-blue-100"
-          />
-        </div>
-      ))}
+              {generateError && (
+                <div className="mt-3 flex items-center gap-1.5 text-xs text-red-400">
+                  <AlertCircle className="h-3.5 w-3.5 shrink-0" />
+                  {generateError}
+                </div>
+              )}
+              {generateSuccess && (
+                <div className="mt-3 flex items-center gap-1.5 text-xs text-emerald-400">
+                  <CheckCircle2 className="h-3.5 w-3.5 shrink-0" />
+                  {generateSuccess}
+                </div>
+              )}
+            </div>
+          </div>
 
-      <div>
-        <button
-          type="button"
-          onClick={handleGenerate}
-          disabled={isGenerating}
-          className="rounded-xl bg-blue-700 px-6 py-2.5 text-white shadow-sm transition hover:bg-blue-800 disabled:opacity-50"
-        >
-          {isGenerating ? "Generating…" : "Generate Testcase"}
-        </button>
+          {/* Right: Testcase matrix */}
+          <div className="lg:col-span-5">
+            <div className="rounded-xl border border-slate-800 bg-slate-900/60 p-4 min-h-[400px] flex flex-col">
+              <div className="flex items-center justify-between mb-3">
+                <h2 className="text-[11px] font-medium uppercase tracking-wider text-slate-400">
+                  Testcase Preview
+                </h2>
+                {matched !== null && (
+                  <span className="text-xs font-mono text-blue-400">
+                    {matched.length} result{matched.length === 1 ? "" : "s"}
+                  </span>
+                )}
+              </div>
 
-        {generateError && <p className="mt-2 text-sm text-red-600">{generateError}</p>}
-        {generateSuccess && <p className="mt-2 text-sm text-green-600">{generateSuccess}</p>}
-      </div>
+              {matched === null ? (
+                <div className="flex-1 flex items-center justify-center text-center px-6">
+                  <div>
+                    <p className="text-sm text-slate-500">Search a requirement to preview testcases</p>
+                    <p className="text-xs text-slate-600 mt-1">
+                      {allTestCases.length > 0
+                        ? `${allTestCases.length} cases loaded from workbook`
+                        : "Upload a workbook to get started"}
+                    </p>
+                  </div>
+                </div>
+              ) : matched.length === 0 ? (
+                <div className="flex-1 flex items-center justify-center text-center px-6">
+                  <div>
+                    <p className="text-sm text-amber-400">No matches</p>
+                    <p className="text-xs text-slate-500 mt-1">
+                      "{reqId}" not found in the workbook
+                    </p>
+                  </div>
+                </div>
+              ) : (
+                <div className="space-y-2 overflow-y-auto max-h-[640px] pr-1">
+                  {matched.map((tc, i) => (
+                    <div
+                      key={tc.testCaseId || i}
+                      className="rounded-lg border border-slate-800 bg-slate-800/40 p-3 hover:border-slate-700 transition"
+                    >
+                      <div className="flex items-start justify-between gap-2 mb-1">
+                        <div>
+                          <span className="font-mono text-xs font-semibold text-blue-400">
+                            {tc.testCaseId}
+                          </span>
+                          <p className="text-xs text-slate-200 mt-0.5">
+                            {tc.title || "Untitled"}
+                          </p>
+                        </div>
+                        <div className="flex items-center gap-1 shrink-0">
+                          {tc.priority && (
+                            <span
+                              className={`text-[10px] font-medium px-1.5 py-0.5 rounded ${
+                                tc.priority.toLowerCase() === "high"
+                                  ? "bg-red-500/15 text-red-400"
+                                  : tc.priority.toLowerCase() === "medium"
+                                  ? "bg-amber-500/15 text-amber-400"
+                                  : "bg-slate-700/50 text-slate-400"
+                              }`}
+                            >
+                              {tc.priority}
+                            </span>
+                          )}
+                          {tc.status && (
+                            <span
+                              className={`inline-flex items-center gap-0.5 text-[10px] font-medium px-1.5 py-0.5 rounded ${
+                                tc.status.toLowerCase() === "pass"
+                                  ? "bg-emerald-500/15 text-emerald-400"
+                                  : tc.status.toLowerCase() === "fail"
+                                  ? "bg-red-500/15 text-red-400"
+                                  : "bg-slate-700/50 text-slate-400"
+                              }`}
+                            >
+                              {tc.status.toLowerCase() === "pass" && <Check className="w-2.5 h-2.5" />}
+                              {tc.status}
+                            </span>
+                          )}
+                        </div>
+                      </div>
+
+                      {tc.objective && (
+                        <p className="text-[11px] text-slate-400 leading-relaxed mt-1.5 line-clamp-3">
+                          {tc.objective}
+                        </p>
+                      )}
+
+                      {tc.passFailCriteria && (
+                        <p className="text-[11px] text-slate-500 font-mono mt-1.5 line-clamp-2">
+                          {tc.passFailCriteria}
+                        </p>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
         </div>
       </main>
     </div>

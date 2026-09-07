@@ -13,8 +13,8 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Brakes India",
-  description: "Created by Karthick Ganesh",
+  title: "Electronic Stability Control | MBD Testcase Automator",
+  description: "Automated MATLAB / Simulink MBD Test Suite Generator for Electronic Stability Control",
 };
 
 export default function RootLayout({
@@ -27,7 +27,7 @@ export default function RootLayout({
       lang="en"
       className={`${geistSans.variable} ${geistMono.variable} h-full antialiased`}
     >
-      <body className="min-h-full flex flex-col">{children}</body>
+      <body className="min-h-full font-sans antialiased bg-slate-950 text-slate-100 selection:bg-blue-600 selection:text-white flex flex-col">{children}</body>
     </html>
   );
 }

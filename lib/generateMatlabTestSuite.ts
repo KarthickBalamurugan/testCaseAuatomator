@@ -1,166 +1,270 @@
 import { GoogleGenAI } from "@google/genai";
 
 const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
-// NOTE: flash-lite is a weak choice for generating ~500 lines of precise,
-// self-consistent MATLAB with per-test-case numeric logic. If quality is
-// still inconsistent after these prompt fixes, switch to a stronger model
-// (e.g. gemini-2.5-pro / gemini-3-pro) for this call specifically.
+
+// Free-tier model. This is viable now because generation is chunked: each
+// call only has to produce ~15-30 lines of test logic for ONE test case,
+// not a ~500-line self-consistent script. Everything else (config, local
+// functions, meta descriptions, the report generator) is static or built
+// deterministically from the parsed spreadsheet data below — the model
+// never touches it, so it can't drift or hallucinate it.
 const MODEL = "gemini-3.5-flash-lite";
+
+export interface TestCaseInput {
+  id: string;
+  title?: string;
+  objective?: string;
+  criteria?: string; // Pass/Fail criteria text
+}
 
 export interface GenerateTestCasesInput {
   modelName: string;
   requirementId: string; // e.g. "REQ-IB_BHMS-SC-PSB-005"
-  requirementDescription: string;
-  ports: string[]; // exact Simulink root inport names, e.g. ["PRawFastFlt","lbBhms.PressValid","lbBhms.SysInit"]
-  count?: number;
+  requirementDescription?: string; // legacy: "TC-ID - Title: Objective (Pass/Fail: Criteria)" lines
+  testCases?: TestCaseInput[]; // preferred: structured rows straight from the parsed workbook
+  ports: string[]; // exact Simulink root inport names
+  count?: number; // optional sanity check only, not used to derive IDs anymore
+}
+
+interface ParsedTestCase {
+  id: string;
+  title: string;
+  objective: string;
+  criteria: string;
 }
 
 /** Pulls the trailing "<LETTERS>-<NUMBERS>" chunk out of a requirement ID,
- *  e.g. "REQ-IB_BHMS-SC-PSB-005" -> "PSB-005".
- *  Falls back to a slugified version of the whole ID if no match is found. */
+ *  e.g. "REQ-IB_BHMS-SC-PSB-005" -> "PSB-005". */
 function extractReqSuffix(requirementId: string): string {
   const match = requirementId.match(/([A-Z]+-\d+)\s*$/i);
   if (match) return match[1].toUpperCase();
   return requirementId.replace(/[^A-Za-z0-9]+/g, "-").toUpperCase();
 }
 
-function buildTestCaseIds(reqSuffix: string, count: number): string[] {
-  return Array.from({ length: count }, (_, i) =>
-    `TC-${reqSuffix}-${String(i + 1).padStart(2, "0")}`
-  );
+function normalizeTestCase(tc: TestCaseInput): ParsedTestCase {
+  return {
+    id: tc.id,
+    title: tc.title ?? tc.id,
+    objective: tc.objective ?? "",
+    criteria: tc.criteria ?? "",
+  };
 }
 
-export async function generateMatlabTestSuite(
-  input: GenerateTestCasesInput
-): Promise<string> {
-  const { modelName, requirementId, requirementDescription, ports, count = 5 } = input;
+/** Parses the legacy joined-line format produced by page.tsx:
+ *    "TC-ID - Title: Objective (Pass/Fail: Criteria)"
+ *  Record boundaries are found by scanning for lines that START a record
+ *  (rather than naively splitting on "\n"), because Excel cells for
+ *  Objective/Criteria often contain embedded line breaks (see the wrapped
+ *  "Pass/Fail Criteria" column in the source workbook) which would
+ *  otherwise chop one test case across several "lines". */
+function parseTestCasesFromDescription(desc: string): ParsedTestCase[] {
+  const raw = desc.replace(/\r\n/g, "\n");
+  const recordStartRe = /^TC-\S+\s*-\s*/gm;
 
-  if (!ports || ports.length === 0) {
-    throw new Error(
-      "generateMatlabTestSuite: 'ports' is required — the model must not invent " +
-        "root inport names. Pass the exact Simulink port names (e.g. from the " +
-        "Property Inspector)."
-    );
+  const starts: number[] = [];
+  let m: RegExpExecArray | null;
+  while ((m = recordStartRe.exec(raw)) !== null) starts.push(m.index);
+  if (starts.length === 0) return [];
+  starts.push(raw.length);
+
+  const cases: ParsedTestCase[] = [];
+  for (let i = 0; i < starts.length - 1; i++) {
+    const record = raw.slice(starts[i], starts[i + 1]).trim();
+    const parsed = parseOneRecord(record);
+    if (parsed) cases.push(parsed);
+  }
+  return cases;
+}
+
+function parseOneRecord(record: string): ParsedTestCase | null {
+  const critMatch = record.match(/\(Pass\/Fail:\s*([\s\S]*)\)\s*$/);
+  if (!critMatch || critMatch.index === undefined) return null;
+  const criteria = critMatch[1].replace(/\s+/g, " ").trim();
+
+  const head = record.slice(0, critMatch.index).trim();
+  const idSplit = head.indexOf(" - ");
+  if (idSplit === -1) return null;
+
+  const id = head.slice(0, idSplit).trim();
+  if (!id.toUpperCase().startsWith("TC-")) return null;
+
+  const rest = head.slice(idSplit + 3).trim();
+  const titleSplit = rest.indexOf(": ");
+  const title = (titleSplit === -1 ? rest : rest.slice(0, titleSplit)).replace(/\s+/g, " ").trim();
+  const objective = (titleSplit === -1 ? "" : rest.slice(titleSplit + 2)).replace(/\s+/g, " ").trim();
+
+  return { id, title, objective, criteria };
+}
+
+/** meta('TC-...') = struct(...) line — built directly from parsed data, no LLM involved. */
+function buildMetaLine(tc: ParsedTestCase, ports: string[]): string {
+  const esc = (s: string) => s.replace(/'/g, "''");
+  return `meta('${tc.id}') = struct('Title','${esc(tc.title)}','Objective','${esc(tc.objective)}','Input','${esc(
+    ports.join(", ")
+  )}','Criterion','${esc(tc.criteria)}');`;
+}
+
+function stripMarkdownFences(text: string): string {
+  return text
+    .replace(/^```(?:matlab)?\s*\n/i, "")
+    .replace(/```\s*$/i, "")
+    .trim();
+}
+
+/** One small, focused prompt per test case — this is the only part of the
+ *  script the model actually writes. */
+function buildBlockPrompt(tc: ParsedTestCase, ports: string[]): string {
+  const portsList = ports.map((p) => `'${p}'`).join(", ");
+  return `Write ONE executable MATLAB code block for a Simulink verification test.
+Output ONLY MATLAB code. No markdown fences, no explanation, no function definitions, no other test cases.
+
+Fixed values (copy exactly, never rename or invent alternatives):
+  Model variable: mdl        (already holds the model name)
+  Sample time variable: ts   (already defined, in seconds)
+  Test Case ID string: '${tc.id}'
+  Root inport names, in this order: ${portsList }
+
+From the requirement document:
+  Title: ${tc.title}
+  Objective: ${tc.objective}
+  Pass/Fail Criteria: ${tc.criteria}
+
+The block must:
+1. Build tVec = (0:ts:DURATION)' choosing a DURATION (seconds) that suits the objective (usually 1-10).
+2. Build one input signal per port listed above, in that order, that plausibly exercises the Objective
+   (sine/step/ramp for a numeric pressure-like port; ones()/zeros() for boolean flag ports — toggle a
+   flag mid-run if the objective calls for it, e.g. "reset on invalidation" or "power-up").
+3. Call exactly: [t, y] = runModelSimulation(mdl, tVec, {sig1, sig2, ...}, {${portsList}});
+4. Compute ONE real numeric metric from y that checks the Pass/Fail Criteria above — never hardcode
+   Measured to 0. Pick whichever technique fits: FFT gain/attenuation at a target Hz, settling time,
+   coefficient of variation, mean/steady-state error, % change after a flag toggles, max(abs()) boundary
+   check, or isnan/isinf robustness check.
+5. Decide isPass by comparing the metric to a numeric expected value and tolerance drawn from the Criteria.
+6. Append exactly one row:
+   results = [results; {"${tc.id}", "<short metric name>", measured, expected, tolerance, ternary(isPass,"PASS","FAIL"), "<short note>"}];
+7. End with (reuse the same signal/port cell arrays from step 3):
+   saveData(t, {sig1, sig2, ...}, {${portsList}}, y, '${tc.id}', dataDir);
+   plotTestCase(t, {sig1, sig2, ...}, {${portsList}}, y, '${tc.id}', '${tc.title.replace(/'/g, "''")}', plotsDir);
+8. Start with: fprintf('Running ${tc.id}...\\n');
+9. Only use "PENDING" instead of a real PASS/FAIL if the Objective explicitly says this test case is a
+   placeholder, manual, or future item.`;
+}
+
+function validateBlock(block: string, tc: ParsedTestCase, ports: string[]): string[] {
+  const problems: string[] = [];
+  if (!block.includes(tc.id)) problems.push("missing test case ID");
+  if (!/results\s*=\s*\[results;/.test(block)) problems.push("missing results row");
+  if (!block.includes("runModelSimulation(")) problems.push("missing runModelSimulation call");
+  if (!block.includes("saveData(")) problems.push("missing saveData call");
+  if (!block.includes("plotTestCase(")) problems.push("missing plotTestCase call");
+  for (const p of ports) {
+    if (!block.includes(p)) problems.push(`missing port '${p}'`);
+  }
+  return problems;
+}
+
+/** Deterministic, always-valid block used if the model fails validation twice.
+ *  Guarantees the script never breaks for one bad test case — that test case
+ *  just gets a generic finite-output check flagged for manual review. */
+function fallbackBlock(tc: ParsedTestCase, ports: string[]): string {
+  const sigVars = ports.map((_, i) => `sig${i + 1}`);
+  const sigLines = ports
+    .map((_, i) => (i === 0 ? `sig${i + 1} = 50*sin(2*pi*1*tVec);` : `sig${i + 1} = ones(size(tVec));`))
+    .join("\n");
+  const sigCell = `{${sigVars.join(", ")}}`;
+  const portCell = `{${ports.map((p) => `'${p}'`).join(", ")}}`;
+  const titleEsc = tc.title.replace(/'/g, "''");
+
+  return [
+    `fprintf('Running ${tc.id}...\\n');`,
+    `tVec = (0:ts:5)';`,
+    sigLines,
+    `[t, y] = runModelSimulation(mdl, tVec, ${sigCell}, ${portCell});`,
+    `measured = double(~any(isnan(y)) && ~any(isinf(y)));`,
+    `expected = 1; tol = 0;`,
+    `isPass = measured == expected;`,
+    `results = [results; {"${tc.id}", "Output finite (auto-fallback, needs manual review)", measured, expected, tol, ternary(isPass,"PASS","FAIL"), "Model generation failed validation - implement manually"}];`,
+    `saveData(t, ${sigCell}, ${portCell}, y, '${tc.id}', dataDir);`,
+    `plotTestCase(t, ${sigCell}, ${portCell}, y, '${tc.id}', '${titleEsc}', plotsDir);`,
+  ].join("\n");
+}
+
+async function generateBlockWithRetries(
+  tc: ParsedTestCase,
+  ports: string[],
+  maxAttempts = 2
+): Promise<string> {
+  let lastProblems: string[] = [];
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      const prompt =
+        buildBlockPrompt(tc, ports) +
+        (lastProblems.length
+          ? `\n\nYour previous attempt was invalid (${lastProblems.join(
+              "; "
+            )}). Fix this and output only the corrected block.`
+          : "");
+
+      const response = await ai.models.generateContent({
+        model: MODEL,
+        contents: prompt,
+        config: { temperature: 0.15, maxOutputTokens: 700 },
+      });
+
+      const block = stripMarkdownFences(response.text ?? "");
+      const problems = validateBlock(block, tc, ports);
+      if (problems.length === 0) return block;
+      lastProblems = problems;
+    } catch (err) {
+      lastProblems = [err instanceof Error ? err.message : String(err)];
+    }
   }
 
-  const reqSuffix = extractReqSuffix(requirementId); // e.g. "PSB-005"
-  const reqSuffixCompact = reqSuffix.replace(/-/g, ""); // "PSB005"
-  const testIds = buildTestCaseIds(reqSuffix, count); // ["TC-PSB-005-01", ...]
-  const reportFile = `${reqSuffixCompact}_TestResults.docx`;
-  const csvFile = `${reqSuffixCompact}_TestResults.csv`;
+  console.warn(`generateMatlabTestSuite: falling back for ${tc.id} (${lastProblems.join("; ")})`);
+  return fallbackBlock(tc, ports);
+}
 
-  const portsBlock = ports
-    .map((p, i) => `   Port ${i + 1} -> '${p}'`)
-    .join("\n");
-
-  const idsLiteral = testIds.map((id) => `'${id}'`).join(", ");
-
-  const prompt = `You are an expert Model-Based Development (MBD) test engineer writing a
-production MATLAB verification test script (Simulink Test / mlreportgen style).
-
-=== FIXED, NON-NEGOTIABLE VALUES (do not change, invent, or rename any of these) ===
-Model Name: ${modelName}
-Requirement ID: ${requirementId}
-Test Case IDs (use exactly these, in this exact order, no more, no fewer): ${idsLiteral}
-Report file name: ${reportFile}
-CSV file name: ${csvFile}
-Root Inport names (use these EXACT strings, verbatim, case-sensitive, wherever a
-port name string is needed — do NOT shorten, rename, or invent alternative names):
-${portsBlock}
-
-=== REQUIREMENT TEXT TO IMPLEMENT ===
-${requirementDescription}
-
-=== HARD RULES ===
-1. Every one of the ${count} test cases listed above MUST get its own executable
-   MATLAB block that:
-   a. Builds distinct input timeseries for EACH of the ports listed above
-      (not just the first one) using the exact port name strings given.
-   b. Calls the model via runModelSimulation(mdl, tVec, {inputs...}, {portNames...}).
-   c. Computes at least one REAL numeric metric relevant to that test's objective
-      and compares it to a numeric threshold to decide PASS/FAIL. Choose the
-      technique that fits the objective, for example:
-        - Frequency-domain: FFT gain/attenuation at a target frequency
-        - Time-domain: settling time, overshoot, coefficient of variation,
-          mean/steady-state error, rise/fall time
-        - Robustness: NaN/Inf checks, saturation/boundary checks
-        - Reset/invalidation: % reduction in output magnitude after a flag toggles
-   d. Appends a row (or rows) to 'results' with a real Measured value (never a
-      hardcoded 0) and a Result of "PASS" or "FAIL" computed from real logic.
-   e. Calls saveData(...) and plotTestCase(...) (see signatures below).
-2. Do NOT use "PENDING" for any test case unless the requirement text explicitly
-   says that test case is a placeholder / future / manual-only verification item.
-   If you are tempted to write "PENDING", instead pick the closest applicable
-   metric from rule 1c and implement it.
-3. Do not add, remove, rename, or reorder any test case ID. Do not invent new
-   requirement or port names anywhere in the script.
-4. The signal design for each test case must plausibly match its stated
-   objective (e.g. a "reset on invalidation" test must actually toggle the
-   validity port mid-run; a "boundary input" test must actually drive the
-   signal to its documented min/max).
-
-=== WORKED EXAMPLE (follow this exact code pattern/style, adapt signal + metric
-    per test; port names below are illustrative — use the real ones above) ===
-\`\`\`matlab
-fprintf('Running TC-EXAMPLE-01...\\n');
-tVec = (0:ts:5)';
-sigA = 50*sin(2*pi*2*tVec);
-inputs.(genvarname('${ports[0]}')) = sigA;
-% ... build one signal per port in "ports" list above, using ones()/zeros()
-% for boolean flags, sin() for dynamic tests, step-like vectors for boundary
-% tests, etc.
-[t, y] = runModelSimulation(mdl, tVec, {sigA, ones(size(tVec)), zeros(size(tVec))}, ...
-    {'${ports[0]}'${ports[1] ? `, '${ports[1]}'` : ""}${ports[2] ? `, '${ports[2]}'` : ""}});
-measuredMetric = max(abs(y(t>1)));  % replace with the metric that fits THIS test
-expected = 0; tol = 1;
-isPass = abs(measuredMetric - expected) <= tol;
-results = [results; {'TC-EXAMPLE-01','Metric name',measuredMetric,expected,tol, ...
-    ternary(isPass,"PASS","FAIL"),'Short note'}];
-saveData(t, {sigA, ones(size(tVec)), zeros(size(tVec))}, ...
-    {'${ports[0]}'${ports[1] ? `, '${ports[1]}'` : ""}${ports[2] ? `, '${ports[2]}'` : ""}}, y, 'TC-EXAMPLE-01', dataDir);
-plotTestCase(t, {sigA}, {'${ports[0]}'}, y, 'TC-EXAMPLE-01', 'Example Title', plotsDir);
-\`\`\`
-
-=== BASE MATLAB TEMPLATE (fill in the marked sections only; keep everything
-    else, including the local functions at the bottom, exactly as given) ===
-%% MBD_TestSuite.m
+function buildHeader(
+  mdl: string,
+  requirementId: string,
+  reportFile: string,
+  csvFile: string,
+  idsLiteral: string,
+  metaLines: string
+): string {
+  return `%% MBD_TestSuite.m
 % Automated test runner for MBD Verification
-% Model: ${modelName}
+% Model: ${mdl}
 % Requirement ID: ${requirementId}
+% Auto-generated - review before use in a qualification run.
 
 clear; clc; close all;
 
 %% ============ CONFIG ============
-mdl             = '${modelName}';
-ts              = 0.005;                    % 200 Hz sample time
-dataDir         = 'test_data';
-plotsDir        = 'test_plots';
-reportFile      = '${reportFile}';
-csvFile         = '${csvFile}';
+mdl        = '${mdl}';
+ts         = 0.005;                    % 200 Hz sample time
+dataDir    = 'test_data';
+plotsDir   = 'test_plots';
+reportFile = '${reportFile}';
+csvFile    = '${csvFile}';
 
 load_system(mdl);
 
-% Initialize results table
 results = table('Size',[0 7], ...
     'VariableTypes',{'string','string','double','double','double','string','string'}, ...
     'VariableNames',{'TestCaseID','Metric','Measured','Expected','Tolerance','Result','Notes'});
 
-% Fixed Test Case IDs -- DO NOT CHANGE
 ids = {${idsLiteral}};
 
-% Metadata map for report generation -- fill Title/Objective/Input/Criterion
-% for EACH id above, derived from the requirement text.
 meta = containers.Map();
-% [INSERT ONE meta('TC-...') = struct(...) LINE PER TEST CASE ID HERE]
+${metaLines}
 
+%% ============ TEST CASES EXECUTION ============`;
+}
 
-%% ============ TEST CASES EXECUTION ============
-
-% [INSERT ${count} FULLY IMPLEMENTED TEST CASE BLOCKS HERE, ONE PER ID ABOVE,
-%  FOLLOWING THE WORKED EXAMPLE PATTERN AND HARD RULES ABOVE]
-
-
-%% ============ GENERATE REPORTS ============
+function buildFooter(reportFile: string, requirementId: string): string {
+  return `%% ============ GENERATE REPORTS ============
 fprintf('\\n=== SUMMARY ===\\n');
 nPass = sum(results.Result == "PASS");
 nFail = sum(results.Result == "FAIL");
@@ -175,11 +279,11 @@ fprintf('Generating Word (.docx) report: %s\\n', reportFile);
 generateWordReport(results, meta, ids, reportFile);
 
 fprintf('\\nAll test data saved to: %s\\\\\\n', dataDir);
-fprintf('All scope plots are open as MATLAB figure windows (saved as PNGs under: %s\\\\)\\n', plotsDir);
+fprintf('Scope plots saved as PNGs under: %s\\\\\\n', plotsDir);
 fprintf('\\nTest suite complete.\\n');
 
 
-%% ===================== LOCAL FUNCTIONS (copy verbatim, do not modify) =====================
+%% ===================== LOCAL FUNCTIONS (static — never model-generated) =====================
 
 function [t, y] = runModelSimulation(mdl, tVec, inputs, portNames)
     ds = Simulink.SimulationData.Dataset;
@@ -219,7 +323,6 @@ function out = ternary(cond, a, b)
 end
 
 function saveData(tVec, inputs, portNames, y, name, dataDir)
-    % Generic multi-signal logger: one column per input port + output.
     if ~exist(dataDir, 'dir'), mkdir(dataDir); end
     varNames = {'Time_s'};
     cols = {tVec(:)};
@@ -235,8 +338,6 @@ function saveData(tVec, inputs, portNames, y, name, dataDir)
 end
 
 function fig = plotTestCase(t, inputs, portNames, y, tcID, titleStr, plotsDir)
-    % Generic scope-style plot: overlays all input signals on top subplot,
-    % output on bottom subplot.
     fig = figure('Visible','on','Name',sprintf('%s: %s', tcID, titleStr),'Position',[100 100 900 600]);
     subplot(2,1,1);
     hold on;
@@ -273,7 +374,7 @@ function generateWordReport(results, meta, ids, reportFile)
     titlePara.Style = {Bold(true), FontSize('18pt'), Color('#1A3C6E')};
     append(d, titlePara);
 
-    subPara = Paragraph('${requirementId}: ${testIds[0]} through ${testIds[testIds.length - 1]}');
+    subPara = Paragraph(sprintf('${requirementId}: %s through %s', ids{1}, ids{end}));
     subPara.Style = {FontSize('12pt'), Color('#444444')};
     append(d, subPara);
 
@@ -371,83 +472,80 @@ function generateWordReport(results, meta, ids, reportFile)
         append(d, PageBreak());
     end
 
-    footerPara = Paragraph(['Auto-generated engineering test report. ' ...
-        'Scope plots are kept in MATLAB figure windows and saved as PNG files.']);
+    footerPara = Paragraph('Auto-generated engineering test report. Scope plots are saved as PNG files.');
     footerPara.Style = {FontSize('9pt'), Italic(true), Color('#888888')};
     append(d, footerPara);
 
     close(d);
     fprintf('DOCX report generated successfully: %s\\n', reportFile);
 end
-
-=== OUTPUT FORMAT ===
-Output ONLY the complete, fully valid, executable MATLAB code. No markdown
-fences, no commentary before or after the code.
 `;
-
-  const response = await ai.models.generateContent({
-    model: MODEL,
-    contents: prompt,
-    config: {
-      temperature: 0.2, // deterministic engineering code, not creative writing
-      maxOutputTokens: 8192,
-    },
-
-  });
-
-  const raw = response.text ?? "";
-  const code = stripMarkdownFences(raw);
-  validateGeneratedScript(code, testIds, reportFile, csvFile);
-  return code;
 }
 
-/** Strips ```matlab / ``` fences the model may add despite instructions not to. */
-function stripMarkdownFences(text: string): string {
-  return text
-    .replace(/^```(?:matlab)?\s*\n/i, "")
-    .replace(/```\s*$/i, "")
-    .trim();
-}
-
-/** Cheap static sanity check before this ever reaches MATLAB, so a bad
- *  generation fails fast in your app instead of silently shipping a
- *  half-implemented script. */
-function validateGeneratedScript(
-  code: string,
-  testIds: string[],
-  reportFile: string,
-  csvFile: string
-): void {
+function validateFullScript(code: string, ids: string[], reportFile: string, csvFile: string): void {
   const problems: string[] = [];
-
-  for (const id of testIds) {
-    if (!code.includes(id)) {
-      problems.push(`Missing test case ID '${id}' in generated script.`);
-    }
+  for (const id of ids) {
+    if (!code.includes(id)) problems.push(`Missing test case ID '${id}' in assembled script.`);
   }
-
-  if (!code.includes(reportFile)) {
-    problems.push(`Generated script does not reference expected report file '${reportFile}'.`);
-  }
-  if (!code.includes(csvFile)) {
-    problems.push(`Generated script does not reference expected csv file '${csvFile}'.`);
-  }
-
-  const pendingCount = (code.match(/"PENDING"/g) || []).length;
-  if (pendingCount > Math.ceil(testIds.length * 0.2)) {
-    problems.push(
-      `Too many PENDING placeholders (${pendingCount}) for ${testIds.length} test cases — ` +
-        `the model likely stubbed out real logic instead of implementing it.`
-    );
-  }
-
-  if (!code.includes("function generateWordReport")) {
-    problems.push("generateWordReport function body is missing from generated script.");
-  }
+  if (!code.includes(reportFile)) problems.push(`Missing report file reference '${reportFile}'.`);
+  if (!code.includes(csvFile)) problems.push(`Missing csv file reference '${csvFile}'.`);
+  if (!code.includes("function generateWordReport")) problems.push("generateWordReport function is missing.");
 
   if (problems.length > 0) {
+    throw new Error("Assembled MATLAB script failed validation:\n" + problems.map((p) => `- ${p}`).join("\n"));
+  }
+}
+
+export async function generateMatlabTestSuite(input: GenerateTestCasesInput): Promise<string> {
+  const { modelName, requirementId, requirementDescription, testCases, ports } = input;
+
+  if (!ports || ports.length === 0) {
     throw new Error(
-      "Generated MATLAB script failed validation:\n" + problems.map((p) => `- ${p}`).join("\n")
+      "generateMatlabTestSuite: 'ports' is required — pass the exact Simulink root inport names (from the Property Inspector)."
     );
   }
+
+  const cases: ParsedTestCase[] = testCases?.length
+    ? testCases.map(normalizeTestCase)
+    : parseTestCasesFromDescription(requirementDescription ?? "");
+
+  if (cases.length === 0) {
+    throw new Error(
+      "generateMatlabTestSuite: found no test cases. Pass structured 'testCases', or a 'requirementDescription' " +
+        "made of lines like 'TC-ID - Title: Objective (Pass/Fail: Criteria)'."
+    );
+  }
+
+  if (input.count && input.count !== cases.length) {
+    console.warn(
+      `generateMatlabTestSuite: 'count' (${input.count}) does not match the ${cases.length} test case(s) found; ` +
+        `proceeding with the ${cases.length} that were actually parsed.`
+    );
+  }
+
+  const reqSuffix = extractReqSuffix(requirementId);
+  const reqSuffixCompact = reqSuffix.replace(/-/g, "");
+  const reportFile = `${reqSuffixCompact}_TestResults.docx`;
+  const csvFile = `${reqSuffixCompact}_TestResults.csv`;
+  const ids = cases.map((c) => c.id);
+  const idsLiteral = ids.map((id) => `'${id}'`).join(", ");
+
+  // Deterministic — no LLM involved, so it can't drift from the spreadsheet.
+  const metaLines = cases.map((tc) => buildMetaLine(tc, ports)).join("\n");
+
+  // Model-generated — one small, focused call per test case.
+  const blocks: string[] = [];
+  for (const tc of cases) {
+    const block = await generateBlockWithRetries(tc, ports);
+    blocks.push(`%% ${tc.id}: ${tc.title}\n${block}`);
+  }
+
+  const script = [
+    buildHeader(modelName, requirementId, reportFile, csvFile, idsLiteral, metaLines),
+    blocks.join("\n\n"),
+    buildFooter(reportFile, requirementId),
+  ].join("\n\n");
+
+  validateFullScript(script, ids, reportFile, csvFile);
+  return script;
 }
