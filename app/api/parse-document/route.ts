@@ -55,7 +55,7 @@ export async function POST(req: NextRequest) {
           ? extractedText.split(/\s+/).filter(Boolean).length
           : 0;
         const lineCount = extractedText
-          ? extractedText.split(/\r?\n/).filter((l) => l.trim().length > 0).length
+          ? extractedText.split(/\r?\n/).filter((l: string) => l.trim().length > 0).length
           : 0;
 
         return NextResponse.json({
@@ -115,7 +115,7 @@ export async function POST(req: NextRequest) {
           ? extractedText.split(/\s+/).filter(Boolean).length
           : 0;
         const lineCount = extractedText
-          ? extractedText.split(/\r?\n/).filter((l) => l.trim().length > 0).length
+          ? extractedText.split(/\r?\n/).filter((l: string) => l.trim().length > 0).length
           : 0;
 
         return NextResponse.json({

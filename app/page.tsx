@@ -1,7 +1,6 @@
 "use client";
 
 import { useState, useMemo, ChangeEvent, DragEvent } from "react";
-import * as XLSX from "xlsx";
 import {
   Upload,
   FileSpreadsheet,
@@ -15,34 +14,7 @@ import {
   Minus,
 } from "lucide-react";
 import Navbar from "./components/Navbar";
-
-const FIELD_ORDER = [
-  "testCaseId",
-  "requirementId",
-  "title",
-  "objective",
-  "preconditions",
-  "ts",
-  "passFailCriteria",
-  "priority",
-  "status",
-  "notes",
-] as const;
-
-export interface ParsedTestCase {
-  sheet: string;
-  testCaseId: string;
-  requirementId: string;
-  title: string;
-  objective: string;
-  preconditions: string;
-  ts: string;
-  passFailCriteria: string;
-  priority: string;
-  status: string;
-  notes: string;
-  [key: string]: string;
-}
+import { parseExcelWorkbook, type ParsedTestCase } from "@/lib/excelParser";
 
 export interface BusPort {
   name: string;
@@ -54,38 +26,8 @@ export interface BusConfig {
 }
 
 function parseWorkbook(arrayBuffer: ArrayBuffer): ParsedTestCase[] {
-  const wb = XLSX.read(arrayBuffer, { type: "array" });
-  const testCases: ParsedTestCase[] = [];
-
-  wb.SheetNames.forEach((sheetName) => {
-    const sheet = wb.Sheets[sheetName];
-    const rows = XLSX.utils.sheet_to_json<unknown[]>(sheet, { header: 1, defval: null });
-    if (!rows || rows.length < 2) return;
-
-    const header = rows[0] as unknown[];
-    if (
-      !header ||
-      typeof header[0] !== "string" ||
-      !header[0].toLowerCase().includes("test case id")
-    ) {
-      return;
-    }
-
-    for (let i = 1; i < rows.length; i++) {
-      const row = rows[i] as unknown[];
-      if (!row || row.length === 0) continue;
-      const tcId = row[0];
-      if (typeof tcId !== "string" || !tcId.toUpperCase().startsWith("TC-")) continue;
-
-      const entry: Record<string, string> = { sheet: sheetName };
-      FIELD_ORDER.forEach((key, idx) => {
-        entry[key] = row[idx] !== undefined && row[idx] !== null ? String(row[idx]) : "";
-      });
-      testCases.push(entry as unknown as ParsedTestCase);
-    }
-  });
-
-  return testCases;
+  const result = parseExcelWorkbook(arrayBuffer);
+  return result.testCases;
 }
 
 const inputCls =
