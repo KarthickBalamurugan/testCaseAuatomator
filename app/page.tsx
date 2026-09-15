@@ -12,6 +12,7 @@ import {
   Check,
   Plus,
   Minus,
+  ListChecks,
 } from "lucide-react";
 import Navbar from "./components/Navbar";
 import { parseExcelWorkbook, type ParsedTestCase } from "@/lib/excelParser";
@@ -46,6 +47,7 @@ export default function TestRequirementForm() {
   const [generateError, setGenerateError] = useState("");
   const [generateSuccess, setGenerateSuccess] = useState("");
   const [isDraggingOver, setIsDraggingOver] = useState(false);
+  const [showAll, setShowAll] = useState(false);
 
   const uniqueReqIds = useMemo(() => {
     const ids = new Set<string>();
@@ -104,10 +106,12 @@ export default function TestRequirementForm() {
     setGenerateSuccess("");
     setNumBuses("");
     setBuses([]);
+    setShowAll(false);
   };
 
   const handleReqIdChange = (value: string) => {
     setReqId(value);
+    setShowAll(false);
     setGenerateError("");
     setGenerateSuccess("");
     const trimmed = value.trim().toLowerCase();
@@ -119,6 +123,14 @@ export default function TestRequirementForm() {
       (tc) => tc.requirementId.trim().toLowerCase() === trimmed
     );
     setMatched(results);
+  };
+
+  const handleSelectAll = () => {
+    setReqId("");
+    setShowAll(true);
+    setMatched(allTestCases);
+    setGenerateError("");
+    setGenerateSuccess("");
   };
 
   const handleBusCountChange = (value: string) => {
@@ -170,20 +182,75 @@ export default function TestRequirementForm() {
       setGenerateError("Enter a model name.");
       return;
     }
+
+    // "All Requirements" mode
+    if (showAll && allTestCases.length > 0) {
+      const portNames = buses
+        .flatMap((bus) => bus.ports.map((port) => port.name.trim()).filter(Boolean));
+
+      const structuredTestCases = allTestCases.map((tc) => ({
+        id: tc.testCaseId,
+        title: tc.title,
+        objective: tc.objective,
+        criteria: tc.passFailCriteria,
+        requirementId: tc.requirementId,
+      }));
+
+      setIsGenerating(true);
+      try {
+        const res = await fetch("/api", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            modelName: modelName.trim(),
+            requirementIds: uniqueReqIds,
+            testCases: structuredTestCases,
+            ports: portNames,
+            count: allTestCases.length,
+          }),
+        });
+
+        if (!res.ok) {
+          const errBody = await res.json().catch(() => ({}));
+          throw new Error(errBody.error || `Request failed with status ${res.status}`);
+        }
+
+        const blob = await res.blob();
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = "MBD_TestSuite_ALL.m";
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        URL.revokeObjectURL(url);
+
+        setGenerateSuccess(`Downloaded: MBD_TestSuite_ALL.m (${allTestCases.length} test cases across ${uniqueReqIds.length} requirements)`);
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : "Generation failed.";
+        setGenerateError(msg);
+      } finally {
+        setIsGenerating(false);
+      }
+      return;
+    }
+
+    // Single requirement mode
     if (!reqId.trim() || !matched || matched.length === 0) {
       setGenerateError("Select a requirement ID with matching testcases.");
       return;
     }
 
-    const requirementDescription = matched
-      .map(
-        (tc) =>
-          `${tc.testCaseId} - ${tc.title}: ${tc.objective} (Pass/Fail: ${tc.passFailCriteria})`
-      )
-      .join("\n");
-
     const portNames = buses
       .flatMap((bus) => bus.ports.map((port) => port.name.trim()).filter(Boolean));
+
+    // Send structured test cases directly from the parsed workbook
+    const structuredTestCases = matched.map((tc) => ({
+      id: tc.testCaseId,
+      title: tc.title,
+      objective: tc.objective,
+      criteria: tc.passFailCriteria,
+    }));
 
     setIsGenerating(true);
     try {
@@ -193,7 +260,7 @@ export default function TestRequirementForm() {
         body: JSON.stringify({
           modelName: modelName.trim(),
           requirementId: reqId.trim(),
-          requirementDescription,
+          testCases: structuredTestCases,
           ports: portNames,
           count: matched.length || 5,
         }),
@@ -332,6 +399,17 @@ export default function TestRequirementForm() {
 
                 {uniqueReqIds.length > 0 && (
                   <div className="flex flex-wrap gap-1 max-h-24 overflow-y-auto">
+                    <button
+                      onClick={handleSelectAll}
+                      className={`rounded-md px-2 py-0.5 text-xs font-medium transition-all inline-flex items-center gap-1 ${
+                        showAll
+                          ? "bg-emerald-600 text-white"
+                          : "bg-slate-800 text-slate-400 hover:bg-slate-700 hover:text-slate-200"
+                      }`}
+                    >
+                      <ListChecks className="h-3 w-3" />
+                      All ({allTestCases.length})
+                    </button>
                     {uniqueReqIds.map((id) => (
                       <button
                         key={id}
@@ -431,7 +509,11 @@ export default function TestRequirementForm() {
               <div className="flex items-center justify-between gap-3">
                 <div>
                   <p className="text-sm font-medium text-slate-200">Generate Test Suite</p>
-                  <p className="text-xs text-slate-500">Downloads a .m MATLAB script</p>
+                  <p className="text-xs text-slate-500">
+                    {showAll
+                      ? `All ${uniqueReqIds.length} requirements · ${allTestCases.length} test cases`
+                      : "Downloads a .m MATLAB script"}
+                  </p>
                 </div>
                 <button
                   onClick={handleGenerate}
@@ -446,7 +528,7 @@ export default function TestRequirementForm() {
                   ) : (
                     <>
                       <Download className="h-4 w-4" />
-                      Generate
+                      {showAll ? "Generate All" : "Generate"}
                     </>
                   )}
                 </button>
@@ -472,11 +554,13 @@ export default function TestRequirementForm() {
             <div className="rounded-xl border border-slate-800 bg-slate-900/60 p-4 min-h-[400px] flex flex-col">
               <div className="flex items-center justify-between mb-3">
                 <h2 className="text-[11px] font-medium uppercase tracking-wider text-slate-400">
-                  Testcase Preview
+                  {showAll ? "All Testcases" : "Testcase Preview"}
                 </h2>
                 {matched !== null && (
                   <span className="text-xs font-mono text-blue-400">
-                    {matched.length} result{matched.length === 1 ? "" : "s"}
+                    {showAll
+                      ? `${matched.length} cases · ${uniqueReqIds.length} reqs`
+                      : `${matched.length} result${matched.length === 1 ? "" : "s"}`}
                   </span>
                 )}
               </div>
@@ -510,6 +594,11 @@ export default function TestRequirementForm() {
                     >
                       <div className="flex items-start justify-between gap-2 mb-1">
                         <div>
+                          {showAll && (
+                            <span className="text-[10px] font-mono text-slate-500 block mb-0.5">
+                              {tc.requirementId}
+                            </span>
+                          )}
                           <span className="font-mono text-xs font-semibold text-blue-400">
                             {tc.testCaseId}
                           </span>

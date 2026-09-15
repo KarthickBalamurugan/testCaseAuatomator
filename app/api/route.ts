@@ -4,20 +4,53 @@ import { generateMatlabTestSuite } from "@/lib/generateMatlabTestSuite";
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
-    const { modelName, requirementId, requirementDescription, ports, count } = body ?? {};
+    const {
+      modelName,
+      requirementId,
+      requirementIds,
+      requirementDescription,
+      testCases,
+      ports,
+      count,
+    } = body ?? {};
 
-    if (
-      typeof modelName !== "string" ||
-      !modelName.trim() ||
-      typeof requirementId !== "string" ||
-      !requirementId.trim() ||
-      typeof requirementDescription !== "string" ||
-      !requirementDescription.trim()
-    ) {
+    if (typeof modelName !== "string" || !modelName.trim()) {
+      return NextResponse.json(
+        { error: "modelName is required and must be a non-empty string." },
+        { status: 400 }
+      );
+    }
+
+    // Validate requirement ID(s)
+    const hasSingleReq =
+      typeof requirementId === "string" && requirementId.trim().length > 0;
+    const hasMultiReqs =
+      Array.isArray(requirementIds) &&
+      requirementIds.length > 0 &&
+      requirementIds.every(
+        (r: unknown) => typeof r === "string" && (r as string).trim().length > 0
+      );
+
+    if (!hasSingleReq && !hasMultiReqs) {
       return NextResponse.json(
         {
           error:
-            "modelName, requirementId, and requirementDescription are required and must be non-empty strings.",
+            "Either 'requirementId' (string) or 'requirementIds' (string array) is required.",
+        },
+        { status: 400 }
+      );
+    }
+
+    // Either structured testCases or a text requirementDescription is needed
+    const hasTestCases = Array.isArray(testCases) && testCases.length > 0;
+    const hasDescription =
+      typeof requirementDescription === "string" && requirementDescription.trim().length > 0;
+
+    if (!hasTestCases && !hasDescription) {
+      return NextResponse.json(
+        {
+          error:
+            "Either 'testCases' (structured array) or 'requirementDescription' (text) must be provided.",
         },
         { status: 400 }
       );
@@ -34,8 +67,13 @@ export async function POST(req: NextRequest) {
 
     const matlabCode = await generateMatlabTestSuite({
       modelName: modelName.trim(),
-      requirementId: requirementId.trim(),
-      requirementDescription: requirementDescription.trim(),
+      ...(hasSingleReq ? { requirementId: requirementId.trim() } : {}),
+      ...(hasMultiReqs
+        ? { requirementIds: requirementIds.map((r: string) => r.trim()) }
+        : {}),
+      ...(hasTestCases
+        ? { testCases }
+        : { requirementDescription: requirementDescription.trim() }),
       ports: safePorts,
       count: safeCount,
     });
@@ -47,8 +85,10 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // Sanitize requirementId for use in a filename
-    const safeFileId = requirementId.trim().replace(/[^a-zA-Z0-9._-]/g, "_");
+    // Determine filename: "ALL" for multi-requirement, or sanitized single ID
+    const safeFileId = hasMultiReqs
+      ? "ALL"
+      : (requirementId as string).trim().replace(/[^a-zA-Z0-9._-]/g, "_");
 
     return new NextResponse(matlabCode, {
       status: 200,

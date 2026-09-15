@@ -8,7 +8,7 @@ const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
 // functions, meta descriptions, the report generator) is static or built
 // deterministically from the parsed spreadsheet data below — the model
 // never touches it, so it can't drift or hallucinate it.
-const MODEL = "gemini-3.5-flash-lite";
+const MODEL = "gemini-3.6-flash";
 
 export interface TestCaseInput {
   id: string;
@@ -19,7 +19,8 @@ export interface TestCaseInput {
 
 export interface GenerateTestCasesInput {
   modelName: string;
-  requirementId: string; // e.g. "REQ-IB_BHMS-SC-PSB-005"
+  requirementId?: string; // single requirement — e.g. "REQ-IB_BHMS-SC-PSB-005"
+  requirementIds?: string[]; // multiple requirements for "generate all" mode
   requirementDescription?: string; // legacy: "TC-ID - Title: Objective (Pass/Fail: Criteria)" lines
   testCases?: TestCaseInput[]; // preferred: structured rows straight from the parsed workbook
   ports: string[]; // exact Simulink root inport names
@@ -31,6 +32,7 @@ interface ParsedTestCase {
   title: string;
   objective: string;
   criteria: string;
+  requirementId?: string; // present in multi-requirement mode
 }
 
 /** Pulls the trailing "<LETTERS>-<NUMBERS>" chunk out of a requirement ID,
@@ -111,10 +113,29 @@ function stripMarkdownFences(text: string): string {
     .trim();
 }
 
+/** Pulls exact numeric (+unit) tokens straight out of the Pass/Fail Criteria
+ *  text, deterministically — no LLM involved. These get handed back to
+ *  Gemini as a locked anchor list so it copies thresholds/tolerances
+ *  instead of re-deriving or rounding them from prose. Mirrors the pattern
+ *  in MultiTestCaseRun.m, which reads calibration constants live from the
+ *  Data Dictionary instead of hardcoding guessed numbers. */
+function extractNumericAnchors(criteria: string): string[] {
+  const re = /-?\d+\.?\d*\s*(?:%|Hz|kHz|ms|s|bar|Bar|N|V|deg|°)?/g;
+  const found = criteria.match(re) ?? [];
+  return Array.from(new Set(found.map((s) => s.trim()))).filter((s) => s.length > 0);
+}
+
 /** One small, focused prompt per test case — this is the only part of the
  *  script the model actually writes. */
 function buildBlockPrompt(tc: ParsedTestCase, ports: string[]): string {
   const portsList = ports.map((p) => `'${p}'`).join(", ");
+  const anchors = extractNumericAnchors(tc.criteria);
+  const anchorBlock = anchors.length
+    ? `Exact figures found in the Pass/Fail Criteria (use these verbatim — do not round, ` +
+      `substitute, or invent additional thresholds): ${anchors.join(", ")}`
+    : `No explicit numeric figures were found in the Criteria — choose a conservative, ` +
+      `clearly-commented threshold and flag it in the Notes field as "tolerance assumed".`;
+
   return `Write ONE executable MATLAB code block for a Simulink verification test.
 Output ONLY MATLAB code. No markdown fences, no explanation, no function definitions, no other test cases.
 
@@ -122,32 +143,43 @@ Fixed values (copy exactly, never rename or invent alternatives):
   Model variable: mdl        (already holds the model name)
   Sample time variable: ts   (already defined, in seconds)
   Test Case ID string: '${tc.id}'
-  Root inport names, in this order: ${portsList }
+  Root inport names, in this order: ${portsList}
 
 From the requirement document:
   Title: ${tc.title}
   Objective: ${tc.objective}
   Pass/Fail Criteria: ${tc.criteria}
 
+${anchorBlock}
+
 The block must:
-1. Build tVec = (0:ts:DURATION)' choosing a DURATION (seconds) that suits the objective (usually 1-10).
-2. Build one input signal per port listed above, in that order, that plausibly exercises the Objective
-   (sine/step/ramp for a numeric pressure-like port; ones()/zeros() for boolean flag ports — toggle a
-   flag mid-run if the objective calls for it, e.g. "reset on invalidation" or "power-up").
+1. Build tVec = (0:ts:DURATION)'. If an anchor above is a frequency in Hz, DURATION must give at
+   least 8-10 full cycles of that frequency (DURATION = 10/f, min 1s). Otherwise pick 1-5s.
+2. Build one input signal per port listed above, in that order, that plausibly exercises the
+   Objective. Numeric/pressure-like ports: sine at the anchor frequency if one exists, else a step
+   or ramp. Boolean/flag ports: ones()/zeros(), toggled mid-run only if the Objective names a
+   transition (e.g. "reset on invalidation", "power-up").
 3. Call exactly: [t, y] = runModelSimulation(mdl, tVec, {sig1, sig2, ...}, {${portsList}});
-4. Compute ONE real numeric metric from y that checks the Pass/Fail Criteria above — never hardcode
-   Measured to 0. Pick whichever technique fits: FFT gain/attenuation at a target Hz, settling time,
-   coefficient of variation, mean/steady-state error, % change after a flag toggles, max(abs()) boundary
-   check, or isnan/isinf robustness check.
-5. Decide isPass by comparing the metric to a numeric expected value and tolerance drawn from the Criteria.
-6. Append exactly one row:
+4. Compute ONE real numeric metric from y. Choose exactly one of these patterns based on the
+   Objective/Criteria wording, and say which one you picked in a one-line comment above the
+   calculation:
+     - "gain/attenuation at Hz"      -> FFT magnitude ratio out/in at the anchor frequency
+     - "settles within X after Ys"   -> time index where |y - final(y)| stays below X, minus offset
+     - "steady-state error <= X"     -> mean(abs(y(end-N:end) - target)) over the tail window
+     - "changes by X% after toggle"  -> compare mean(y) in pre-toggle vs post-toggle windows
+     - "stays within bounds [lo,hi]" -> max/min(y) against the bounds
+     - "finite/no fault"             -> ~any(isnan(y)) && ~any(isinf(y))
+   Never hardcode measured to 0.
+5. Set expected and tolerance directly from the anchor figures above (not re-derived or rounded).
+6. Decide isPass by comparing measured to expected within tolerance.
+7. Append exactly one row:
    results = [results; {"${tc.id}", "<short metric name>", measured, expected, tolerance, ternary(isPass,"PASS","FAIL"), "<short note>"}];
-7. End with (reuse the same signal/port cell arrays from step 3):
+8. End with (reuse the same signal/port cell arrays from step 3):
    saveData(t, {sig1, sig2, ...}, {${portsList}}, y, '${tc.id}', dataDir);
    plotTestCase(t, {sig1, sig2, ...}, {${portsList}}, y, '${tc.id}', '${tc.title.replace(/'/g, "''")}', plotsDir);
-8. Start with: fprintf('Running ${tc.id}...\\n');
-9. Only use "PENDING" instead of a real PASS/FAIL if the Objective explicitly says this test case is a
-   placeholder, manual, or future item.`;
+9. Start with: fprintf('Running ${tc.id}...\\n');
+10. Only use "PENDING" instead of a real PASS/FAIL if the Objective explicitly says this test case
+    is a placeholder, manual, or future item.`;
 }
 
 function validateBlock(block: string, tc: ParsedTestCase, ports: string[]): string[] {
@@ -209,7 +241,7 @@ async function generateBlockWithRetries(
       const response = await ai.models.generateContent({
         model: MODEL,
         contents: prompt,
-        config: { temperature: 0.15, maxOutputTokens: 700 },
+        config: { temperature: 0.15, maxOutputTokens: 4000 },
       });
 
       const block = stripMarkdownFences(response.text ?? "");
@@ -497,7 +529,7 @@ function validateFullScript(code: string, ids: string[], reportFile: string, csv
 }
 
 export async function generateMatlabTestSuite(input: GenerateTestCasesInput): Promise<string> {
-  const { modelName, requirementId, requirementDescription, testCases, ports } = input;
+  const { modelName, requirementId, requirementIds, requirementDescription, testCases, ports } = input;
 
   if (!ports || ports.length === 0) {
     throw new Error(
@@ -505,47 +537,116 @@ export async function generateMatlabTestSuite(input: GenerateTestCasesInput): Pr
     );
   }
 
-  const cases: ParsedTestCase[] = testCases?.length
-    ? testCases.map(normalizeTestCase)
+  const isMultiReq = Array.isArray(requirementIds) && requirementIds.length > 0;
+
+  // ── Normalize incoming test cases ──────────────────────────────
+  const rawCases: ParsedTestCase[] = testCases?.length
+    ? testCases.map((tc) => ({
+        ...normalizeTestCase(tc),
+        requirementId: (tc as Record<string, unknown>).requirementId as string | undefined,
+      }))
     : parseTestCasesFromDescription(requirementDescription ?? "");
 
-  if (cases.length === 0) {
+  if (rawCases.length === 0) {
     throw new Error(
       "generateMatlabTestSuite: found no test cases. Pass structured 'testCases', or a 'requirementDescription' " +
         "made of lines like 'TC-ID - Title: Objective (Pass/Fail: Criteria)'."
     );
   }
 
-  if (input.count && input.count !== cases.length) {
+  if (input.count && input.count !== rawCases.length) {
     console.warn(
-      `generateMatlabTestSuite: 'count' (${input.count}) does not match the ${cases.length} test case(s) found; ` +
-        `proceeding with the ${cases.length} that were actually parsed.`
+      `generateMatlabTestSuite: 'count' (${input.count}) does not match the ${rawCases.length} test case(s) found; ` +
+        `proceeding with the ${rawCases.length} that were actually parsed.`
     );
   }
 
-  const reqSuffix = extractReqSuffix(requirementId);
+  // ── Multi-requirement mode ─────────────────────────────────────
+  if (isMultiReq) {
+    return generateMultiRequirement(modelName, requirementIds!, rawCases, ports);
+  }
+
+  // ── Single-requirement mode (original path) ────────────────────
+  const singleReqId = requirementId ?? "";
+  const reqSuffix = extractReqSuffix(singleReqId);
   const reqSuffixCompact = reqSuffix.replace(/-/g, "");
   const reportFile = `${reqSuffixCompact}_TestResults.docx`;
   const csvFile = `${reqSuffixCompact}_TestResults.csv`;
-  const ids = cases.map((c) => c.id);
+  const ids = rawCases.map((c) => c.id);
   const idsLiteral = ids.map((id) => `'${id}'`).join(", ");
 
-  // Deterministic — no LLM involved, so it can't drift from the spreadsheet.
-  const metaLines = cases.map((tc) => buildMetaLine(tc, ports)).join("\n");
+  const metaLines = rawCases.map((tc) => buildMetaLine(tc, ports)).join("\n");
 
-  // Model-generated — one small, focused call per test case.
   const blocks: string[] = [];
-  for (const tc of cases) {
+  for (const tc of rawCases) {
     const block = await generateBlockWithRetries(tc, ports);
     blocks.push(`%% ${tc.id}: ${tc.title}\n${block}`);
   }
 
   const script = [
-    buildHeader(modelName, requirementId, reportFile, csvFile, idsLiteral, metaLines),
+    buildHeader(modelName, singleReqId, reportFile, csvFile, idsLiteral, metaLines),
     blocks.join("\n\n"),
-    buildFooter(reportFile, requirementId),
+    buildFooter(reportFile, singleReqId),
   ].join("\n\n");
 
   validateFullScript(script, ids, reportFile, csvFile);
+  return script;
+}
+
+/** Generate a single combined .m script covering multiple requirement IDs. */
+async function generateMultiRequirement(
+  modelName: string,
+  requirementIds: string[],
+  rawCases: ParsedTestCase[],
+  ports: string[]
+): Promise<string> {
+  // Group cases by requirementId (preserving workbook order)
+  const groups = new Map<string, ParsedTestCase[]>();
+  for (const reqId of requirementIds) {
+    const key = reqId.trim().toLowerCase();
+    const matches = rawCases.filter(
+      (tc) => (tc.requirementId ?? "").trim().toLowerCase() === key
+    );
+    if (matches.length > 0) groups.set(reqId, matches);
+  }
+
+  if (groups.size === 0) {
+    throw new Error(
+      "generateMultiRequirement: no test cases matched the provided requirement IDs."
+    );
+  }
+
+  const allIds: string[] = [];
+  const allMetaLines: string[] = [];
+  const allBlocks: string[] = [];
+
+  for (const [reqId, cases] of groups) {
+    allIds.push(...cases.map((c) => c.id));
+    allMetaLines.push(...cases.map((tc) => buildMetaLine(tc, ports)));
+
+    // Section header per requirement
+    allBlocks.push(`\n%% ============================================================`);
+    allBlocks.push(`%% REQUIREMENT: ${reqId} (${cases.length} test case${cases.length === 1 ? "" : "s"})`);
+    allBlocks.push(`%% ============================================================`);
+
+    for (const tc of cases) {
+      const block = await generateBlockWithRetries(tc, ports);
+      allBlocks.push(`%% ${tc.id}: ${tc.title}\n${block}`);
+    }
+  }
+
+  // Use "ALL" as the report key
+  const reportFile = `ALL_TestResults.docx`;
+  const csvFile = `ALL_TestResults.csv`;
+  const reqLabel = requirementIds.join(", ");
+  const idsLiteral = allIds.map((id) => `'${id}'`).join(", ");
+
+  const script = [
+    buildHeader(modelName, reqLabel, reportFile, csvFile, idsLiteral, allMetaLines.join("\n")),
+    allBlocks.join("\n\n"),
+    buildFooter(reportFile, reqLabel),
+  ].join("\n\n");
+
+  validateFullScript(script, allIds, reportFile, csvFile);
   return script;
 }
