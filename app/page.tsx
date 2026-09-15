@@ -10,21 +10,12 @@ import {
   AlertCircle,
   Download,
   Check,
-  Plus,
-  Minus,
   ListChecks,
+  Cable,
 } from "lucide-react";
 import Navbar from "./components/Navbar";
 import { parseExcelWorkbook, type ParsedTestCase } from "@/lib/excelParser";
-
-export interface BusPort {
-  name: string;
-}
-
-export interface BusConfig {
-  portCount: string | number;
-  ports: BusPort[];
-}
+import { parsePortsWorkbook, type ParsedPort } from "@/lib/portExcelParser";
 
 function parseWorkbook(arrayBuffer: ArrayBuffer): ParsedTestCase[] {
   const result = parseExcelWorkbook(arrayBuffer);
@@ -39,8 +30,12 @@ export default function TestRequirementForm() {
   const [fileName, setFileName] = useState("");
   const [allTestCases, setAllTestCases] = useState<ParsedTestCase[]>([]);
   const [parseError, setParseError] = useState("");
-  const [numBuses, setNumBuses] = useState("");
-  const [buses, setBuses] = useState<BusConfig[]>([]);
+  const [portsFileName, setPortsFileName] = useState("");
+  const [parsedPorts, setParsedPorts] = useState<ParsedPort[]>([]);
+  const [portsParseError, setPortsParseError] = useState("");
+  const [portsParseWarning, setPortsParseWarning] = useState("");
+  const [skippedInternal, setSkippedInternal] = useState(0);
+  const [isDraggingPorts, setIsDraggingPorts] = useState(false);
   const [reqId, setReqId] = useState("");
   const [matched, setMatched] = useState<ParsedTestCase[] | null>(null);
   const [isGenerating, setIsGenerating] = useState(false);
@@ -65,8 +60,6 @@ export default function TestRequirementForm() {
     setReqId("");
     setGenerateError("");
     setGenerateSuccess("");
-    setNumBuses("");
-    setBuses([]);
 
     try {
       const buffer = await file.arrayBuffer();
@@ -104,9 +97,58 @@ export default function TestRequirementForm() {
     setParseError("");
     setGenerateError("");
     setGenerateSuccess("");
-    setNumBuses("");
-    setBuses([]);
     setShowAll(false);
+  };
+
+  const handlePortsUpload = async (file?: File) => {
+    if (!file) return;
+    setPortsParseError("");
+    setPortsParseWarning("");
+    setParsedPorts([]);
+    setSkippedInternal(0);
+    setGenerateError("");
+    setGenerateSuccess("");
+
+    try {
+      const buffer = await file.arrayBuffer();
+      const result = parsePortsWorkbook(buffer);
+      if (result.ports.length === 0) {
+        setPortsParseError(
+          result.warnings[0] ||
+            "No Input/Output ports found. Internal rows are ignored."
+        );
+        setPortsFileName("");
+        return;
+      }
+      setParsedPorts(result.ports);
+      setSkippedInternal(result.skippedInternal);
+      setPortsFileName(file.name);
+      if (result.warnings.length > 0) {
+        setPortsParseWarning(result.warnings.join(" "));
+      }
+    } catch {
+      setPortsParseError("Could not read this file. Is it a valid .xlsx?");
+      setPortsFileName("");
+    }
+  };
+
+  const handlePortsInputChange = (e: ChangeEvent<HTMLInputElement>) => {
+    handlePortsUpload(e.target.files?.[0]);
+    e.target.value = "";
+  };
+
+  const handlePortsDrop = (e: DragEvent<HTMLLabelElement>) => {
+    e.preventDefault();
+    setIsDraggingPorts(false);
+    handlePortsUpload(e.dataTransfer.files?.[0]);
+  };
+
+  const clearPortsFile = () => {
+    setPortsFileName("");
+    setParsedPorts([]);
+    setPortsParseError("");
+    setPortsParseWarning("");
+    setSkippedInternal(0);
   };
 
   const handleReqIdChange = (value: string) => {
@@ -133,46 +175,14 @@ export default function TestRequirementForm() {
     setGenerateSuccess("");
   };
 
-  const handleBusCountChange = (value: string) => {
-    setNumBuses(value);
-    const n = value === "" ? 0 : Math.max(0, parseInt(value, 10) || 0);
-    setBuses((prev) => {
-      const updated = [...prev];
-      if (n > updated.length) {
-        while (updated.length < n) updated.push({ portCount: "", ports: [] });
-      } else {
-        updated.splice(n);
-      }
-      return updated;
-    });
-  };
-
-  const handleBusPortCountChange = (busIndex: number, value: string) => {
-    const n = value === "" ? 0 : Math.max(0, parseInt(value, 10) || 0);
-    setBuses((prev) => {
-      const updated = [...prev];
-      const currentBus = updated[busIndex] || { portCount: "", ports: [] };
-      const nextPorts = [...currentBus.ports];
-      if (n > nextPorts.length) {
-        while (nextPorts.length < n) nextPorts.push({ name: "" });
-      } else {
-        nextPorts.splice(n);
-      }
-      updated[busIndex] = { ...currentBus, portCount: value, ports: nextPorts };
-      return updated;
-    });
-  };
-
-  const handleBusPortChange = (busIndex: number, portIndex: number, value: string) => {
-    setBuses((prev) => {
-      const updated = [...prev];
-      const currentBus = updated[busIndex] || { portCount: 0, ports: [] };
-      const updatedPorts = [...currentBus.ports];
-      updatedPorts[portIndex] = { name: value };
-      updated[busIndex] = { ...currentBus, ports: updatedPorts };
-      return updated;
-    });
-  };
+  const inputPorts = useMemo(
+    () => parsedPorts.filter((p) => p.ioRole === "Input"),
+    [parsedPorts]
+  );
+  const outputPorts = useMemo(
+    () => parsedPorts.filter((p) => p.ioRole === "Output"),
+    [parsedPorts]
+  );
 
   const handleGenerate = async () => {
     setGenerateError("");
@@ -183,10 +193,20 @@ export default function TestRequirementForm() {
       return;
     }
 
+    if (inputPorts.length === 0) {
+      setGenerateError("Upload a ports Excel that includes at least one Input port.");
+      return;
+    }
+
+    const portNames = inputPorts.map((p) => p.name);
+    const portSpecs = parsedPorts.map((p) => ({
+      name: p.name,
+      ioRole: p.ioRole,
+      datatype: p.datatype,
+    }));
+
     // "All Requirements" mode
     if (showAll && allTestCases.length > 0) {
-      const portNames = buses
-        .flatMap((bus) => bus.ports.map((port) => port.name.trim()).filter(Boolean));
 
       const structuredTestCases = allTestCases.map((tc) => ({
         id: tc.testCaseId,
@@ -206,6 +226,7 @@ export default function TestRequirementForm() {
             requirementIds: uniqueReqIds,
             testCases: structuredTestCases,
             ports: portNames,
+            portSpecs,
             count: allTestCases.length,
           }),
         });
@@ -240,9 +261,6 @@ export default function TestRequirementForm() {
       setGenerateError("Select a requirement ID with matching testcases.");
       return;
     }
-
-    const portNames = buses
-      .flatMap((bus) => bus.ports.map((port) => port.name.trim()).filter(Boolean));
 
     // Send structured test cases directly from the parsed workbook
     const structuredTestCases = matched.map((tc) => ({

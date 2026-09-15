@@ -1,20 +1,24 @@
-import { GoogleGenAI } from "@google/genai";
+import { generateText } from "./llmClient";
 
-const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
-
-// Free-tier model. This is viable now because generation is chunked: each
+// Free-tier model via OpenRouter. This is viable now because generation is chunked: each
 // call only has to produce ~15-30 lines of test logic for ONE test case,
 // not a ~500-line self-consistent script. Everything else (config, local
 // functions, meta descriptions, the report generator) is static or built
 // deterministically from the parsed spreadsheet data below — the model
 // never touches it, so it can't drift or hallucinate it.
-const MODEL = "gemini-3.6-flash";
+const MODEL = "google/gemini-2.5-flash";
 
 export interface TestCaseInput {
   id: string;
   title?: string;
   objective?: string;
   criteria?: string; // Pass/Fail criteria text
+}
+
+export interface PortSpec {
+  name: string;
+  ioRole: "Input" | "Output";
+  datatype?: string;
 }
 
 export interface GenerateTestCasesInput {
@@ -24,6 +28,7 @@ export interface GenerateTestCasesInput {
   requirementDescription?: string; // legacy: "TC-ID - Title: Objective (Pass/Fail: Criteria)" lines
   testCases?: TestCaseInput[]; // preferred: structured rows straight from the parsed workbook
   ports: string[]; // exact Simulink root inport names
+  portSpecs?: PortSpec[]; // optional Input/Output metadata parsed from the IO workbook
   count?: number; // optional sanity check only, not used to derive IDs anymore
 }
 
@@ -127,14 +132,36 @@ function extractNumericAnchors(criteria: string): string[] {
 
 /** One small, focused prompt per test case — this is the only part of the
  *  script the model actually writes. */
-function buildBlockPrompt(tc: ParsedTestCase, ports: string[]): string {
+function formatPortSpecs(portSpecs: PortSpec[] | undefined, role: "Input" | "Output"): string {
+  const rows = (portSpecs ?? []).filter((p) => p.ioRole === role && p.name.trim());
+  if (rows.length === 0) return "";
+  return rows
+    .map((p) => {
+      const dtype = p.datatype?.trim();
+      return dtype ? `${p.name} (${dtype})` : p.name;
+    })
+    .join(", ");
+}
+
+function buildBlockPrompt(tc: ParsedTestCase, ports: string[], portSpecs?: PortSpec[]): string {
   const portsList = ports.map((p) => `'${p}'`).join(", ");
+  const inputSpecs = formatPortSpecs(portSpecs, "Input");
+  const outputSpecs = formatPortSpecs(portSpecs, "Output");
   const anchors = extractNumericAnchors(tc.criteria);
   const anchorBlock = anchors.length
     ? `Exact figures found in the Pass/Fail Criteria (use these verbatim — do not round, ` +
       `substitute, or invent additional thresholds): ${anchors.join(", ")}`
     : `No explicit numeric figures were found in the Criteria — choose a conservative, ` +
       `clearly-commented threshold and flag it in the Notes field as "tolerance assumed".`;
+
+  const ioBlock = [
+    inputSpecs ? `  Input port datatypes: ${inputSpecs}` : "",
+    outputSpecs
+      ? `  Output ports (observe in y / metric only — do not inject as inports): ${outputSpecs}`
+      : "",
+  ]
+    .filter(Boolean)
+    .join("\n");
 
   return `Write ONE executable MATLAB code block for a Simulink verification test.
 Output ONLY MATLAB code. No markdown fences, no explanation, no function definitions, no other test cases.
@@ -143,7 +170,7 @@ Fixed values (copy exactly, never rename or invent alternatives):
   Model variable: mdl        (already holds the model name)
   Sample time variable: ts   (already defined, in seconds)
   Test Case ID string: '${tc.id}'
-  Root inport names, in this order: ${portsList}
+  Root inport names, in this order: ${portsList}${ioBlock ? `\n${ioBlock}` : ""}
 
 From the requirement document:
   Title: ${tc.title}
@@ -224,6 +251,7 @@ function fallbackBlock(tc: ParsedTestCase, ports: string[]): string {
 async function generateBlockWithRetries(
   tc: ParsedTestCase,
   ports: string[],
+  portSpecs?: PortSpec[],
   maxAttempts = 2
 ): Promise<string> {
   let lastProblems: string[] = [];
@@ -231,20 +259,21 @@ async function generateBlockWithRetries(
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     try {
       const prompt =
-        buildBlockPrompt(tc, ports) +
+        buildBlockPrompt(tc, ports, portSpecs) +
         (lastProblems.length
           ? `\n\nYour previous attempt was invalid (${lastProblems.join(
               "; "
             )}). Fix this and output only the corrected block.`
           : "");
 
-      const response = await ai.models.generateContent({
+      const responseText = await generateText({
         model: MODEL,
-        contents: prompt,
-        config: { temperature: 0.15, maxOutputTokens: 4000 },
+        prompt,
+        temperature: 0.15,
+        maxOutputTokens: 4000,
       });
 
-      const block = stripMarkdownFences(response.text ?? "");
+      const block = stripMarkdownFences(responseText);
       const problems = validateBlock(block, tc, ports);
       if (problems.length === 0) return block;
       lastProblems = problems;
@@ -529,7 +558,7 @@ function validateFullScript(code: string, ids: string[], reportFile: string, csv
 }
 
 export async function generateMatlabTestSuite(input: GenerateTestCasesInput): Promise<string> {
-  const { modelName, requirementId, requirementIds, requirementDescription, testCases, ports } = input;
+  const { modelName, requirementId, requirementIds, requirementDescription, testCases, ports, portSpecs } = input;
 
   if (!ports || ports.length === 0) {
     throw new Error(
@@ -543,7 +572,7 @@ export async function generateMatlabTestSuite(input: GenerateTestCasesInput): Pr
   const rawCases: ParsedTestCase[] = testCases?.length
     ? testCases.map((tc) => ({
         ...normalizeTestCase(tc),
-        requirementId: (tc as Record<string, unknown>).requirementId as string | undefined,
+        requirementId: (tc as unknown as Record<string, unknown>).requirementId as string | undefined,
       }))
     : parseTestCasesFromDescription(requirementDescription ?? "");
 
@@ -563,7 +592,7 @@ export async function generateMatlabTestSuite(input: GenerateTestCasesInput): Pr
 
   // ── Multi-requirement mode ─────────────────────────────────────
   if (isMultiReq) {
-    return generateMultiRequirement(modelName, requirementIds!, rawCases, ports);
+    return generateMultiRequirement(modelName, requirementIds!, rawCases, ports, portSpecs);
   }
 
   // ── Single-requirement mode (original path) ────────────────────
@@ -579,7 +608,7 @@ export async function generateMatlabTestSuite(input: GenerateTestCasesInput): Pr
 
   const blocks: string[] = [];
   for (const tc of rawCases) {
-    const block = await generateBlockWithRetries(tc, ports);
+    const block = await generateBlockWithRetries(tc, ports, portSpecs);
     blocks.push(`%% ${tc.id}: ${tc.title}\n${block}`);
   }
 
@@ -598,7 +627,8 @@ async function generateMultiRequirement(
   modelName: string,
   requirementIds: string[],
   rawCases: ParsedTestCase[],
-  ports: string[]
+  ports: string[],
+  portSpecs?: PortSpec[]
 ): Promise<string> {
   // Group cases by requirementId (preserving workbook order)
   const groups = new Map<string, ParsedTestCase[]>();
@@ -630,7 +660,7 @@ async function generateMultiRequirement(
     allBlocks.push(`%% ============================================================`);
 
     for (const tc of cases) {
-      const block = await generateBlockWithRetries(tc, ports);
+      const block = await generateBlockWithRetries(tc, ports, portSpecs);
       allBlocks.push(`%% ${tc.id}: ${tc.title}\n${block}`);
     }
   }

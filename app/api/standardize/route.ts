@@ -206,26 +206,6 @@ function excelBase64ToTextTable(b64: string): string {
   }
 }
 
-/** Extract response text from GenerateContentResponse, handling edge cases. */
-function extractResponseText(response: Awaited<ReturnType<typeof ai.models.generateContent>>): string {
-  // Primary: use the .text getter (concatenates text parts from first candidate)
-  const text = (response.text ?? "").trim();
-  if (text) return text;
-
-  // Fallback: manually walk candidates → content → parts
-  const candidates = response.candidates;
-  if (candidates && candidates.length > 0) {
-    const parts = candidates[0]?.content?.parts;
-    if (parts && parts.length > 0) {
-      return parts
-        .map((p) => (typeof p === "object" && "text" in p ? p.text ?? "" : ""))
-        .join("")
-        .trim();
-    }
-  }
-  return "";
-}
-
 /**
  * Aggressively extract a JSON array from arbitrary LLM text output.
  * Tries: (1) direct parse, (2) markdown fence extraction, (3) bracket search,
@@ -295,6 +275,26 @@ function extractJsonArray(raw: string): { requirementId: string; testCases: Reco
   }
 
   return null;
+}
+
+/** Extract response text from GenerateContentResponse, handling edge cases. */
+function extractResponseText(response: Awaited<ReturnType<typeof ai.models.generateContent>>): string {
+  // Primary: use the .text getter (concatenates text parts from first candidate)
+  const text = (response.text ?? "").trim();
+  if (text) return text;
+
+  // Fallback: manually walk candidates → content → parts
+  const candidates = response.candidates;
+  if (candidates && candidates.length > 0) {
+    const parts = candidates[0]?.content?.parts;
+    if (parts && parts.length > 0) {
+      return parts
+        .map((p) => (typeof p === "object" && "text" in p ? p.text ?? "" : ""))
+        .join("")
+        .trim();
+    }
+  }
+  return "";
 }
 
 /* ─── POST Handler ───────────────────────────────────────────── */

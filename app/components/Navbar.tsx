@@ -3,11 +3,12 @@
 import Image from "next/image";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { ScanText, Sparkles, FileSpreadsheet } from "lucide-react";
+import { ScanText, Sparkles, FileSpreadsheet, Code2 } from "lucide-react";
 
 const navLinks = [
-  { href: "/", label: "Automator", icon: FileSpreadsheet },
+  // { href: "/", label: "Automator", icon: FileSpreadsheet },
   { href: "/standardizer", label: "Standardizer", icon: Sparkles },
+  { href: "/test-generator", label: "Test Generator", icon: Code2 },
   { href: "/parser", label: "Doc Parser", icon: ScanText },
 ];
 
