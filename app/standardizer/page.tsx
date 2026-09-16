@@ -8,7 +8,6 @@ import {
   Sparkles,
   X,
   Loader2,
-  Download,
   Copy,
   Check,
   ChevronDown,

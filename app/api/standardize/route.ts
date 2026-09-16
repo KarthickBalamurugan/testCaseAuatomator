@@ -1,11 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { GoogleGenAI, createPartFromBase64 } from "@google/genai";
 import * as XLSX from "xlsx";
-import {
-  DEFAULT_STANDARDIZER_PROMPT,
-  type StandardizedTestCase,
-  type RequirementGroup,
-} from "@/lib/standardizer-types";
+import { DEFAULT_STANDARDIZER_PROMPT } from "@/lib/standardizer-types";
 
 const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
 /** Models known to support file attachments — fallback order */
@@ -16,9 +12,6 @@ const FALLBACK_MODELS = [
   "gemini-3.5-flash-lite",
 ];
 const DEFAULT_MODEL = FALLBACK_MODELS[0];
-
-// Re-export for any server-side consumers
-export { DEFAULT_STANDARDIZER_PROMPT, type StandardizedTestCase, type RequirementGroup };
 
 /**
  * Prompt suffix that instructs the LLM to return ONLY JSON.
@@ -62,108 +55,6 @@ Rules:
 - CRITICAL: You MUST include every single requirement and every single test case. Do NOT stop early.
 - Keep the original order of requirements and test cases.
 `;
-
-export function parseStandardizedText(text: string): {
-  groups: RequirementGroup[];
-  allTestCases: StandardizedTestCase[];
-} {
-  const lines = text.split(/\r?\n/);
-  const groups: RequirementGroup[] = [];
-  let currentReqId = "";
-  let currentTestCases: StandardizedTestCase[] = [];
-
-  const isHeaderRow = (line: string) => {
-    const l = line.toLowerCase();
-    return (
-      (l.includes("test case id") || l.includes("tc id") || l.includes("testcase id")) &&
-      (l.includes("title") || l.includes("objective") || l.includes("pass/fail"))
-    );
-  };
-
-  const isDividerRow = (line: string) => {
-    return /^[\s|:=-]+$/.test(line.trim());
-  };
-
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i].trim();
-    if (!line) continue;
-
-    // Check if line is a table header or divider
-    if (isHeaderRow(line) || isDividerRow(line)) {
-      continue;
-    }
-
-    // Check if line is a pipe-separated test case row
-    const isPipeRow = line.includes("|");
-    const isDirectTcRow = line.toUpperCase().startsWith("TC-");
-
-    if (isPipeRow || isDirectTcRow) {
-      let parts: string[] = [];
-      if (isPipeRow) {
-        parts = line.split("|").map((p) => p.trim());
-        if (parts.length > 0 && parts[0] === "") parts.shift();
-        if (parts.length > 0 && parts[parts.length - 1] === "") parts.pop();
-      } else {
-        parts = line.split(/\t+/).map((p) => p.trim());
-      }
-
-      if (parts.length >= 2) {
-        const firstCol = parts[0] || "";
-        if (isHeaderRow(firstCol)) continue;
-
-        const effectiveReqId = currentReqId || "REQ-GENERAL";
-
-        const tc: StandardizedTestCase = {
-          testCaseId: firstCol || `TC-${currentTestCases.length + 1}`,
-          requirementId: effectiveReqId,
-          title: parts[1] || "",
-          objective: parts[2] || "",
-          preconditions: parts[3] || "",
-          ts: parts[4] || "",
-          passFailCriteria: parts[5] || "",
-          priority: parts[6] || "High",
-          status: parts[7] || "Not Run",
-          notes: parts[8] || "",
-        };
-
-        currentTestCases.push(tc);
-        continue;
-      }
-    }
-
-    // Otherwise, this line is likely a REQUIREMENT ID header
-    const cleanHeader = line
-      .replace(/^[#\s*]+/, "")
-      .replace(/[*#:]+$/, "")
-      .trim();
-
-    if (
-      cleanHeader &&
-      !cleanHeader.toLowerCase().startsWith("user input") &&
-      !cleanHeader.startsWith("---") &&
-      !cleanHeader.startsWith("===")
-    ) {
-      if (currentTestCases.length > 0) {
-        groups.push({
-          requirementId: currentReqId || "REQ-GENERAL",
-          testCases: currentTestCases,
-        });
-        currentTestCases = [];
-      }
-      currentReqId = cleanHeader;
-    }
-  }
-
-  if (currentTestCases.length > 0) {
-    groups.push({
-      requirementId: currentReqId || "REQ-GENERAL",
-      testCases: currentTestCases,
-    });
-  }
-
-  const allTestCases = groups.flatMap((g) => g.testCases);
-  return { groups, allTestCases };
-}
 
 /** Excel column order for the standardized output (flat, automator-friendly) */
 const EXCEL_COLS = [

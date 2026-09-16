@@ -61,7 +61,7 @@ export interface RequirementRow {
   [key: string]: string | undefined;
 }
 
-export function escapeRe(s: string): string {
+function escapeRe(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
@@ -118,7 +118,7 @@ export function scanUnmappedGlyphs(
 
 const HEADING_RE = /^\s*(\d+(?:\.\d+)*)\s+(.+?)\s*$/;
 
-export function headingTitle(line: string): string | null {
+function headingTitle(line: string): string | null {
   const m = line.match(HEADING_RE);
   if (!m) return null;
   const title = m[2];
@@ -127,7 +127,7 @@ export function headingTitle(line: string): string | null {
   return title.trim();
 }
 
-export function cleanNoise(text: string): string {
+function cleanNoise(text: string): string {
   return text
     .replace(/\f/g, "\n")
     .split("\n")
@@ -151,7 +151,7 @@ export function cleanNoise(text: string): string {
     .join("\n");
 }
 
-export function detectSections(text: string): Array<{ pos: number; name: string }> {
+function detectSections(text: string): Array<{ pos: number; name: string }> {
   const sections: Array<{ pos: number; name: string }> = [];
   const lines = text.split("\n");
   let pos = 0;
@@ -163,7 +163,7 @@ export function detectSections(text: string): Array<{ pos: number; name: string 
   return sections;
 }
 
-export function sectionFor(
+function sectionFor(
   sections: Array<{ pos: number; name: string }>,
   pos: number
 ): string {
@@ -175,19 +175,19 @@ export function sectionFor(
   return cat;
 }
 
-export function stripHeadingLines(block: string): string {
+function stripHeadingLines(block: string): string {
   return block
     .split("\n")
     .filter((l) => !headingTitle(l))
     .join("\n");
 }
 
-export function grabSimpleField(block: string, label: string): string {
+function grabSimpleField(block: string, label: string): string {
   const m = block.match(new RegExp(escapeRe(label) + "\\s+(.+)"));
   return m ? m[1].trim() : "";
 }
 
-export function parseSequentialLongFields(
+function parseSequentialLongFields(
   tail: string,
   labels: string[]
 ): Record<string, string> {
@@ -215,7 +215,7 @@ export function parseSequentialLongFields(
   return out;
 }
 
-export function splitBlocks(text: string) {
+function splitBlocks(text: string) {
   const re = /Requirement\s+(\S+)\s*[—\-:]\s*(.+)/g;
   return [...text.matchAll(re)];
 }

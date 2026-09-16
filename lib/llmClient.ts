@@ -52,20 +52,4 @@ export async function generateText(options: GenerateTextOptions): Promise<string
   return response.choices?.[0]?.message?.content?.trim() ?? "";
 }
 
-/**
- * Generate content with a file attachment (base64 Excel).
- * On OpenRouter, falls back to embedding a text representation of the file
- * in the prompt since binary file parts aren't supported.
- */
-export async function generateTextWithFile(
-  options: GenerateTextOptions & { fileBase64?: string; textTable?: string }
-): Promise<string> {
-  const { fileBase64, textTable, prompt, ...rest } = options;
 
-  // Build user message content — include the text table if available
-  const userContent: string = prompt;
-
-  return generateText({ ...rest, prompt: userContent });
-}
-
-export default client;

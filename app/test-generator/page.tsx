@@ -8,7 +8,6 @@ import {
   FileJson,
   X,
   Loader2,
-  Download,
   Search,
   CheckCircle2,
   AlertCircle,
