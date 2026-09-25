@@ -19,10 +19,19 @@ import {
   ChevronRight,
   Copy,
   Check,
+  FileCode,
+  Download,
 } from "lucide-react";
 import Navbar from "../components/Navbar";
 import { parseExcelWorkbook, type ParsedTestCase } from "@/lib/excelParser";
-import { parsePortsWorkbook, type ParsedPort } from "@/lib/portExcelParser";
+import {
+  parseInterfaceWorkbook,
+  type ModelInterface,
+  cleanInterfaceForExport,
+  createEmptyInterface,
+  validateInterface,
+} from "@/lib/interfaceExcelParser";
+import InterfaceEditor from "./InterfaceEditor";
 import {
   type RequirementGroup,
   type StandardizedTestCase,
@@ -65,12 +74,13 @@ export default function TestGeneratorPage() {
   const [allTestCases, setAllTestCases] = useState<NormalizedTestCase[]>([]);
   const [reqParseError, setReqParseError] = useState("");
 
-  // Ports state
-  const [portsFileName, setPortsFileName] = useState("");
-  const [parsedPorts, setParsedPorts] = useState<ParsedPort[]>([]);
-  const [portsParseError, setPortsParseError] = useState("");
-  const [portsParseWarning, setPortsParseWarning] = useState("");
-  const [skippedInternal, setSkippedInternal] = useState(0);
+  // Interface state
+  const [interfaceFileName, setInterfaceFileName] = useState("");
+  const [interfaceState, setInterfaceState] = useState<ModelInterface | null>(null);
+  const [interfaceParseError, setInterfaceParseError] = useState("");
+  const [interfaceParseWarning, setInterfaceParseWarning] = useState("");
+  const [interfaceConfirmed, setInterfaceConfirmed] = useState(false);
+  const [finalInterfaceJson, setFinalInterfaceJson] = useState<any | null>(null);
 
   // Model & selection
   const [modelName, setModelName] = useState("ESC_Stability_Controller");
@@ -88,10 +98,10 @@ export default function TestGeneratorPage() {
 
   // Drag states
   const [isDraggingReqs, setIsDraggingReqs] = useState(false);
-  const [isDraggingPorts, setIsDraggingPorts] = useState(false);
+  const [isDraggingInterface, setIsDraggingInterface] = useState(false);
 
   const reqFileInputRef = useRef<HTMLInputElement>(null);
-  const portsFileInputRef = useRef<HTMLInputElement>(null);
+  const interfaceFileInputRef = useRef<HTMLInputElement>(null);
 
   /* ─── Derived values ─────────────────────────────────────── */
 
@@ -104,14 +114,32 @@ export default function TestGeneratorPage() {
     return Array.from(ids);
   }, [allTestCases]);
 
-  const inputPorts = useMemo(
-    () => parsedPorts.filter((p) => p.ioRole === "Input"),
-    [parsedPorts]
-  );
-  const outputPorts = useMemo(
-    () => parsedPorts.filter((p) => p.ioRole === "Output"),
-    [parsedPorts]
-  );
+  const flatPorts = useMemo(() => {
+    if (!interfaceState) return { inputs: [], outputs: [], all: [] };
+    const inputs: { name: string; ioRole: "Input"; datatype?: string }[] = [];
+    const outputs: { name: string; ioRole: "Output"; datatype?: string }[] = [];
+
+    // Inputs
+    interfaceState.inputs.ports.forEach((p) => {
+      inputs.push({ name: p.name, ioRole: "Input", datatype: p.data_type });
+    });
+    interfaceState.inputs.buses.forEach((b) => {
+      inputs.push({ name: b.name, ioRole: "Input", datatype: "bus" });
+    });
+
+    // Outputs
+    interfaceState.outputs.ports.forEach((p) => {
+      outputs.push({ name: p.name, ioRole: "Output", datatype: p.data_type });
+    });
+    interfaceState.outputs.buses.forEach((b) => {
+      outputs.push({ name: b.name, ioRole: "Output", datatype: "bus" });
+    });
+
+    return { inputs, outputs, all: [...inputs, ...outputs] };
+  }, [interfaceState]);
+
+  const inputPorts = flatPorts.inputs;
+  const outputPorts = flatPorts.outputs;
 
   const totalCount = allTestCases.length;
   const matchCount = matched?.length ?? 0;
@@ -282,59 +310,80 @@ export default function TestGeneratorPage() {
     setGeneratedCode("");
   };
 
-  /* ─── Ports file handling ────────────────────────────────── */
+  /* ─── Interface file handling ────────────────────────────── */
 
-  const processPortsFile = useCallback(async (file: File) => {
-    setPortsParseError("");
-    setPortsParseWarning("");
-    setParsedPorts([]);
-    setSkippedInternal(0);
+  const processInterfaceFile = useCallback(async (file: File) => {
+    setInterfaceParseError("");
+    setInterfaceParseWarning("");
+    setInterfaceFileName("");
+    setInterfaceState(null);
+    setInterfaceConfirmed(false);
+    setFinalInterfaceJson(null);
     setGenerateError("");
     setGenerateSuccess("");
 
+    const ext = file.name.split(".").pop()?.toLowerCase();
+
     try {
-      const buffer = await file.arrayBuffer();
-      const result = parsePortsWorkbook(buffer);
-      if (result.ports.length === 0) {
-        setPortsParseError(
-          result.warnings[0] || "No Input/Output ports found. Internal rows are skipped."
-        );
-        setPortsFileName("");
-        return;
-      }
-      setParsedPorts(result.ports);
-      setSkippedInternal(result.skippedInternal);
-      setPortsFileName(file.name);
-      if (result.warnings.length > 0) {
-        setPortsParseWarning(result.warnings.join(" "));
+      if (ext === "xlsx" || ext === "xls") {
+        const buffer = await file.arrayBuffer();
+        const result = parseInterfaceWorkbook(buffer);
+        if (result.totalInputs === 0 && result.totalOutputs === 0) {
+          setInterfaceParseError(
+            result.warnings[0] || "No Input or Output signals/buses found in workbook."
+          );
+          setInterfaceFileName("");
+          return;
+        }
+        if (result.warnings.length > 0) {
+          setInterfaceParseWarning(result.warnings.join(" "));
+        }
+        setInterfaceState(result.interfaceData);
+        setInterfaceFileName(file.name);
+      } else {
+        setInterfaceParseError("Unsupported file type. Use .xlsx or .xls files.");
       }
     } catch {
-      setPortsParseError("Could not read this file. Is it a valid .xlsx?");
+      setInterfaceParseError("Failed to parse file. Ensure it is a valid Excel file.");
     }
   }, []);
 
-  const handlePortsFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleInterfaceFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
-    if (file) processPortsFile(file);
+    if (file) processInterfaceFile(file);
     e.target.value = "";
   };
 
-  const handlePortsDrop = useCallback(
+  const handleInterfaceDrop = useCallback(
     (e: React.DragEvent) => {
       e.preventDefault();
-      setIsDraggingPorts(false);
+      setIsDraggingInterface(false);
       const file = e.dataTransfer.files[0];
-      if (file) processPortsFile(file);
+      if (file) processInterfaceFile(file);
     },
-    [processPortsFile]
+    [processInterfaceFile]
   );
 
-  const clearPorts = () => {
-    setPortsFileName("");
-    setParsedPorts([]);
-    setPortsParseError("");
-    setPortsParseWarning("");
-    setSkippedInternal(0);
+  const clearInterface = () => {
+    setInterfaceFileName("");
+    setInterfaceState(null);
+    setInterfaceParseError("");
+    setInterfaceParseWarning("");
+    setInterfaceConfirmed(false);
+    setFinalInterfaceJson(null);
+  };
+
+  const handleConfirmInterface = () => {
+    if (!interfaceState) return;
+    const validation = validateInterface(interfaceState);
+    if (!validation.isValid) {
+      setInterfaceParseError("Please fix validation errors before confirming interface.");
+      return;
+    }
+    const cleanJson = cleanInterfaceForExport(interfaceState);
+    setFinalInterfaceJson(cleanJson);
+    setInterfaceConfirmed(true);
+    setInterfaceParseError("");
   };
 
   /* ─── Requirement selection ──────────────────────────────── */
@@ -385,7 +434,7 @@ export default function TestGeneratorPage() {
     }
 
     const portNames = inputPorts.map((p) => p.name);
-    const portSpecs = parsedPorts.map((p) => ({
+    const portSpecs = flatPorts.all.map((p) => ({
       name: p.name,
       ioRole: p.ioRole,
       datatype: p.datatype,
@@ -469,7 +518,7 @@ export default function TestGeneratorPage() {
   /* ─── Render ─────────────────────────────────────────────── */
 
   const hasReqs = allTestCases.length > 0;
-  const hasPorts = parsedPorts.length > 0;
+  const hasPorts = (inputPorts.length > 0 || outputPorts.length > 0);
 
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100">
@@ -638,135 +687,121 @@ export default function TestGeneratorPage() {
               </div>
             )}
 
-            {/* Ports Workbook */}
+            {/* Input/Output Document (Model Interface) */}
             <div className="rounded-xl border border-slate-800 bg-slate-900/60 p-4">
               <div className="flex items-center justify-between mb-3">
-                <label className="text-[11px] font-medium uppercase tracking-wider text-slate-400">
-                  I/O Ports Workbook
-                </label>
-                {parsedPorts.length > 0 && (
-                  <span className="text-xs text-slate-500 font-mono">
-                    {inputPorts.length} in · {outputPorts.length} out
-                    {skippedInternal > 0 ? ` · ${skippedInternal} internal` : ""}
-                  </span>
+                <div className="flex items-center gap-2">
+                  <Cable className="h-4 w-4 text-blue-400" />
+                  <label className="text-[11px] font-medium uppercase tracking-wider text-slate-400">
+                    Input / Output Document
+                  </label>
+                </div>
+                {interfaceState && (
+                  <div className="flex items-center gap-2">
+                    {interfaceConfirmed ? (
+                      <span className="inline-flex items-center gap-1 rounded-full bg-emerald-500/10 px-2 py-0.5 text-[11px] font-medium text-emerald-400 border border-emerald-500/20">
+                        <CheckCircle2 className="h-3 w-3" /> Confirmed
+                      </span>
+                    ) : (
+                      <span className="inline-flex items-center gap-1 rounded-full bg-amber-500/10 px-2 py-0.5 text-[11px] font-medium text-amber-400 border border-amber-500/20">
+                        Unconfirmed
+                      </span>
+                    )}
+                    <span className="text-xs text-slate-500 font-mono">
+                      {inputPorts.length} in · {outputPorts.length} out
+                    </span>
+                  </div>
                 )}
               </div>
 
-              {!portsFileName ? (
-                <label
-                  onDrop={handlePortsDrop}
-                  onDragOver={(e) => {
-                    e.preventDefault();
-                    setIsDraggingPorts(true);
-                  }}
-                  onDragLeave={(e) => {
-                    e.preventDefault();
-                    setIsDraggingPorts(false);
-                  }}
-                  className={`flex items-center gap-2.5 rounded-lg border-2 border-dashed px-3 py-3 cursor-pointer transition-all text-sm ${
-                    isDraggingPorts
-                      ? "border-blue-500 bg-blue-500/10"
-                      : "border-slate-700 bg-slate-800 hover:border-slate-600"
-                  }`}
-                >
-                  <Cable className="h-4 w-4 text-slate-400 shrink-0" />
-                  <span className="text-slate-300">
-                    Drop IO .xlsx (Input/Output ports only)
-                  </span>
-                  <input
-                    ref={portsFileInputRef}
-                    type="file"
-                    accept=".xlsx,.xls"
-                    onChange={handlePortsFileChange}
-                    className="hidden"
-                  />
-                </label>
-              ) : (
-                <div className="flex items-center gap-2 rounded-lg border border-blue-500/30 bg-blue-500/10 px-3 py-2">
-                  <FileSpreadsheet className="h-4 w-4 text-blue-400 shrink-0" />
-                  <span className="text-sm text-blue-300 truncate flex-1">
-                    {portsFileName}
-                  </span>
-                  <button
-                    onClick={clearPorts}
-                    className="text-slate-400 hover:text-white transition shrink-0"
+              {!interfaceFileName && !interfaceState ? (
+                <div className="space-y-3">
+                  <label
+                    onDrop={handleInterfaceDrop}
+                    onDragOver={(e) => {
+                      e.preventDefault();
+                      setIsDraggingInterface(true);
+                    }}
+                    onDragLeave={(e) => {
+                      e.preventDefault();
+                      setIsDraggingInterface(false);
+                    }}
+                    className={`flex flex-col items-center justify-center rounded-lg border-2 border-dashed p-6 cursor-pointer transition-all text-sm ${
+                      isDraggingInterface
+                        ? "border-blue-500 bg-blue-500/10"
+                        : "border-slate-700 bg-slate-800 hover:border-slate-600 hover:bg-slate-800/80"
+                    }`}
                   >
-                    <X className="h-3.5 w-3.5" />
-                  </button>
-                </div>
-              )}
-
-              {portsParseError && (
-                <div className="mt-2 flex items-center gap-1.5 text-xs text-red-400">
-                  <AlertCircle className="h-3.5 w-3.5 shrink-0" />
-                  {portsParseError}
-                </div>
-              )}
-              {portsParseWarning && !portsParseError && (
-                <div className="mt-2 flex items-center gap-1.5 text-xs text-amber-400">
-                  <AlertCircle className="h-3.5 w-3.5 shrink-0" />
-                  {portsParseWarning}
-                </div>
-              )}
-
-              {parsedPorts.length > 0 && (
-                <div className="mt-3 space-y-3">
-                  <div>
-                    <p className="text-[11px] font-medium text-slate-400 mb-1.5">
-                      Input Ports
-                    </p>
-                    {inputPorts.length === 0 ? (
-                      <p className="text-xs text-amber-400">
-                        No Input ports found. Internal rows were skipped.
-                      </p>
-                    ) : (
-                      <div className="flex flex-wrap gap-1">
-                        {inputPorts.map((p) => (
-                          <span
-                            key={`in-${p.signalId || p.name}`}
-                            className="rounded-md bg-slate-800 px-2 py-0.5 text-[11px] font-mono text-slate-200"
-                            title={p.datatype || undefined}
-                          >
-                            {p.name}
-                            {p.datatype ? (
-                              <span className="text-slate-500">
-                                {" "}
-                                · {p.datatype}
-                              </span>
-                            ) : null}
-                          </span>
-                        ))}
-                      </div>
-                    )}
+                    <Upload className="h-6 w-6 text-slate-400 mb-2" />
+                    <span className="text-sm font-medium text-slate-200">
+                      Drop Interface Excel (.xlsx, .xls)
+                    </span>
+                    <span className="text-xs text-slate-500 mt-1 text-center">
+                      Auto-detects buses, nested hierarchy, ports, datatypes, dimensions, signal types & metadata
+                    </span>
+                    <input
+                      ref={interfaceFileInputRef}
+                      type="file"
+                      accept=".xlsx,.xls"
+                      onChange={handleInterfaceFileChange}
+                      className="hidden"
+                    />
+                  </label>
+                  <div className="flex items-center justify-between text-xs px-1">
+                    <span className="text-slate-500">Don&apos;t have an Excel file?</span>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setInterfaceState(createEmptyInterface());
+                        setInterfaceFileName("Manual Interface Definition");
+                      }}
+                      className="text-blue-400 hover:text-blue-300 hover:underline transition font-medium"
+                    >
+                      + Create Interface from Scratch
+                    </button>
                   </div>
-                  <div>
-                    <p className="text-[11px] font-medium text-slate-400 mb-1.5">
-                      Output Ports
-                    </p>
-                    {outputPorts.length === 0 ? (
-                      <p className="text-xs text-slate-500">
-                        No Output ports found.
-                      </p>
-                    ) : (
-                      <div className="flex flex-wrap gap-1">
-                        {outputPorts.map((p) => (
-                          <span
-                            key={`out-${p.signalId || p.name}`}
-                            className="rounded-md bg-slate-800 px-2 py-0.5 text-[11px] font-mono text-slate-200"
-                            title={p.datatype || undefined}
-                          >
-                            {p.name}
-                            {p.datatype ? (
-                              <span className="text-slate-500">
-                                {" "}
-                                · {p.datatype}
-                              </span>
-                            ) : null}
-                          </span>
-                        ))}
-                      </div>
-                    )}
+                </div>
+              ) : (
+                <div className="space-y-4">
+                  <div className="flex items-center gap-2 rounded-lg border border-blue-500/30 bg-blue-500/10 px-3 py-2">
+                    <FileSpreadsheet className="h-4 w-4 text-blue-400 shrink-0" />
+                    <span className="text-sm text-blue-300 truncate flex-1 font-mono">
+                      {interfaceFileName || "Custom Interface"}
+                    </span>
+                    <button
+                      onClick={clearInterface}
+                      className="text-slate-400 hover:text-white transition shrink-0 p-1"
+                      title="Clear interface"
+                    >
+                      <X className="h-4 w-4" />
+                    </button>
                   </div>
+
+                  {interfaceParseError && (
+                    <div className="flex items-center gap-1.5 text-xs text-red-400 bg-red-950/20 p-2.5 rounded-lg border border-red-800/30">
+                      <AlertCircle className="h-4 w-4 shrink-0" />
+                      {interfaceParseError}
+                    </div>
+                  )}
+
+                  {interfaceParseWarning && !interfaceParseError && (
+                    <div className="flex items-center gap-1.5 text-xs text-amber-400 bg-amber-950/20 p-2.5 rounded-lg border border-amber-800/30">
+                      <AlertCircle className="h-4 w-4 shrink-0" />
+                      {interfaceParseWarning}
+                    </div>
+                  )}
+
+                  {interfaceState && (
+                    <InterfaceEditor
+                      interfaceState={interfaceState}
+                      onChange={(newState) => {
+                        setInterfaceState(newState);
+                        setInterfaceConfirmed(false);
+                      }}
+                      onConfirm={handleConfirmInterface}
+                      isConfirmed={interfaceConfirmed}
+                    />
+                  )}
                 </div>
               )}
             </div>
