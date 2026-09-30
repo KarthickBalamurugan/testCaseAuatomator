@@ -116,12 +116,33 @@ export default function TestGeneratorPage() {
 
   const flatPorts = useMemo(() => {
     if (!interfaceState) return { inputs: [], outputs: [], all: [] };
-    const inputs: { name: string; ioRole: "Input"; datatype?: string }[] = [];
-    const outputs: { name: string; ioRole: "Output"; datatype?: string }[] = [];
+    const inputs: {
+      name: string;
+      ioRole: "Input";
+      datatype?: string;
+      dimensions?: number[] | string | null;
+      signalType?: string;
+      enumValues?: string;
+    }[] = [];
+    const outputs: {
+      name: string;
+      ioRole: "Output";
+      datatype?: string;
+      dimensions?: number[] | string | null;
+      signalType?: string;
+      enumValues?: string;
+    }[] = [];
 
     // Inputs
     interfaceState.inputs.ports.forEach((p) => {
-      inputs.push({ name: p.name, ioRole: "Input", datatype: p.data_type });
+      inputs.push({
+        name: p.name,
+        ioRole: "Input",
+        datatype: p.data_type,
+        dimensions: p.dimensions,
+        signalType: p.signal_type,
+        enumValues: p.enum_values ?? p.enum_class,
+      });
     });
     interfaceState.inputs.buses.forEach((b) => {
       inputs.push({ name: b.name, ioRole: "Input", datatype: "bus" });
@@ -129,7 +150,14 @@ export default function TestGeneratorPage() {
 
     // Outputs
     interfaceState.outputs.ports.forEach((p) => {
-      outputs.push({ name: p.name, ioRole: "Output", datatype: p.data_type });
+      outputs.push({
+        name: p.name,
+        ioRole: "Output",
+        datatype: p.data_type,
+        dimensions: p.dimensions,
+        signalType: p.signal_type,
+        enumValues: p.enum_values ?? p.enum_class,
+      });
     });
     interfaceState.outputs.buses.forEach((b) => {
       outputs.push({ name: b.name, ioRole: "Output", datatype: "bus" });
@@ -438,6 +466,9 @@ export default function TestGeneratorPage() {
       name: p.name,
       ioRole: p.ioRole,
       datatype: p.datatype,
+      dimensions: p.dimensions,
+      signalType: p.signalType,
+      enumValues: p.enumValues,
     }));
 
     const activeCases = showAll ? allTestCases : matched!;
@@ -456,6 +487,7 @@ export default function TestGeneratorPage() {
       testCases: structuredTestCases,
       ports: portNames,
       portSpecs,
+      interfaceJson: finalInterfaceJson ?? cleanInterfaceForExport(interfaceState!),
       count: activeCases.length,
     };
 

@@ -27,6 +27,7 @@ export async function POST(req: NextRequest) {
       testCases,
       ports,
       portSpecs,
+      interfaceJson,
       count,
     } = body ?? {};
 
@@ -81,6 +82,9 @@ export async function POST(req: NextRequest) {
         )
       : [];
 
+    const safeInterfaceJson =
+      interfaceJson && typeof interfaceJson === "object" ? interfaceJson : undefined;
+
     if (safePorts.length === 0) {
       return NextResponse.json(
         { error: "At least one Input port must be provided in 'ports'." },
@@ -125,6 +129,7 @@ export async function POST(req: NextRequest) {
         : { requirementDescription: requirementDescription.trim() }),
       ports: safePorts,
       portSpecs: safePortSpecs,
+      interfaceJson: safeInterfaceJson,
       count: safeCount,
     });
 

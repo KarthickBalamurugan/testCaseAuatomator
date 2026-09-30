@@ -19,6 +19,9 @@ export interface PortSpec {
   name: string;
   ioRole: "Input" | "Output";
   datatype?: string;
+  dimensions?: number[] | string | null;
+  signalType?: string;
+  enumValues?: string;
 }
 
 export interface GenerateTestCasesInput {
@@ -29,6 +32,7 @@ export interface GenerateTestCasesInput {
   testCases?: TestCaseInput[]; // preferred: structured rows straight from the parsed workbook
   ports: string[]; // exact Simulink root inport names
   portSpecs?: PortSpec[]; // optional Input/Output metadata parsed from the IO workbook
+  interfaceJson?: unknown; // complete cleaned Input/Output document, including enum values
   count?: number; // optional sanity check only, not used to derive IDs anymore
 }
 
@@ -138,12 +142,23 @@ function formatPortSpecs(portSpecs: PortSpec[] | undefined, role: "Input" | "Out
   return rows
     .map((p) => {
       const dtype = p.datatype?.trim();
-      return dtype ? `${p.name} (${dtype})` : p.name;
+      const details = [
+        dtype,
+        p.signalType?.trim(),
+        p.dimensions == null ? "" : `dimensions=${typeof p.dimensions === "string" ? p.dimensions : JSON.stringify(p.dimensions)}`,
+        p.enumValues?.trim() ? `If enum=${p.enumValues.trim()}` : "",
+      ].filter(Boolean);
+      return details.length > 0 ? `${p.name} (${details.join(", ")})` : p.name;
     })
     .join(", ");
 }
 
-function buildBlockPrompt(tc: ParsedTestCase, ports: string[], portSpecs?: PortSpec[]): string {
+function buildBlockPrompt(
+  tc: ParsedTestCase,
+  ports: string[],
+  portSpecs?: PortSpec[],
+  interfaceJson?: unknown
+): string {
   const portsList = ports.map((p) => `'${p}'`).join(", ");
   const inputSpecs = formatPortSpecs(portSpecs, "Input");
   const outputSpecs = formatPortSpecs(portSpecs, "Output");
@@ -162,6 +177,9 @@ function buildBlockPrompt(tc: ParsedTestCase, ports: string[], portSpecs?: PortS
   ]
     .filter(Boolean)
     .join("\n");
+  const interfaceBlock = interfaceJson
+    ? `\nComplete Input/Output interface JSON (authoritative; use If enum values when selecting enum inputs):\n${JSON.stringify(interfaceJson, null, 2)}\n`
+    : "";
 
   return `Write ONE executable MATLAB code block for a Simulink verification test.
 Output ONLY MATLAB code. No markdown fences, no explanation, no function definitions, no other test cases.
@@ -176,6 +194,7 @@ From the requirement document:
   Title: ${tc.title}
   Objective: ${tc.objective}
   Pass/Fail Criteria: ${tc.criteria}
+${interfaceBlock}
 
 ${anchorBlock}
 
@@ -252,6 +271,7 @@ async function generateBlockWithRetries(
   tc: ParsedTestCase,
   ports: string[],
   portSpecs?: PortSpec[],
+  interfaceJson?: unknown,
   maxAttempts = 2
 ): Promise<string> {
   let lastProblems: string[] = [];
@@ -259,7 +279,7 @@ async function generateBlockWithRetries(
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     try {
       const prompt =
-        buildBlockPrompt(tc, ports, portSpecs) +
+        buildBlockPrompt(tc, ports, portSpecs, interfaceJson) +
         (lastProblems.length
           ? `\n\nYour previous attempt was invalid (${lastProblems.join(
               "; "
@@ -558,7 +578,7 @@ function validateFullScript(code: string, ids: string[], reportFile: string, csv
 }
 
 export async function generateMatlabTestSuite(input: GenerateTestCasesInput): Promise<string> {
-  const { modelName, requirementId, requirementIds, requirementDescription, testCases, ports, portSpecs } = input;
+  const { modelName, requirementId, requirementIds, requirementDescription, testCases, ports, portSpecs, interfaceJson } = input;
 
   if (!ports || ports.length === 0) {
     throw new Error(
@@ -592,7 +612,7 @@ export async function generateMatlabTestSuite(input: GenerateTestCasesInput): Pr
 
   // ── Multi-requirement mode ─────────────────────────────────────
   if (isMultiReq) {
-    return generateMultiRequirement(modelName, requirementIds!, rawCases, ports, portSpecs);
+    return generateMultiRequirement(modelName, requirementIds!, rawCases, ports, portSpecs, interfaceJson);
   }
 
   // ── Single-requirement mode (original path) ────────────────────
@@ -608,7 +628,7 @@ export async function generateMatlabTestSuite(input: GenerateTestCasesInput): Pr
 
   const blocks: string[] = [];
   for (const tc of rawCases) {
-    const block = await generateBlockWithRetries(tc, ports, portSpecs);
+    const block = await generateBlockWithRetries(tc, ports, portSpecs, interfaceJson);
     blocks.push(`%% ${tc.id}: ${tc.title}\n${block}`);
   }
 
@@ -628,7 +648,8 @@ async function generateMultiRequirement(
   requirementIds: string[],
   rawCases: ParsedTestCase[],
   ports: string[],
-  portSpecs?: PortSpec[]
+  portSpecs?: PortSpec[],
+  interfaceJson?: unknown
 ): Promise<string> {
   // Group cases by requirementId (preserving workbook order)
   const groups = new Map<string, ParsedTestCase[]>();
@@ -660,7 +681,7 @@ async function generateMultiRequirement(
     allBlocks.push(`%% ============================================================`);
 
     for (const tc of cases) {
-      const block = await generateBlockWithRetries(tc, ports, portSpecs);
+      const block = await generateBlockWithRetries(tc, ports, portSpecs, interfaceJson);
       allBlocks.push(`%% ${tc.id}: ${tc.title}\n${block}`);
     }
   }

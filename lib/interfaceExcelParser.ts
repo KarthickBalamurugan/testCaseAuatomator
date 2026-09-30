@@ -18,6 +18,7 @@ export interface InterfaceSignal {
   data_type?: string;
   signal_type?: SignalType;
   wheel_order?: string[];
+  enum_values?: string;
   enum_class?: string;
   metadata?: Record<string, unknown>;
 }
@@ -80,6 +81,7 @@ export interface CleanSignal {
   data_type?: string;
   signal_type?: string;
   wheel_order?: string[];
+  enum_values?: string;
   enum_class?: string;
   metadata?: Record<string, unknown>;
 }
@@ -339,6 +341,7 @@ const WHEEL_ORDER_PATTERNS = [
 ];
 
 const ENUM_CLASS_PATTERNS = [
+  /^\s*if\s+enum\s*$/i,
   /\benum\s*(?:class|type|name|values?)?\b/i,
   /\benumeration\b/i,
 ];
@@ -766,6 +769,7 @@ export function parseInterfaceWorkbook(arrayBuffer: ArrayBuffer | Uint8Array): P
         data_type: rawDataType || undefined,
         signal_type: rawSignalType ? rawSignalType.toLowerCase() : undefined,
         wheel_order: wheelOrder,
+        enum_values: rawEnumClass || undefined,
         enum_class: rawEnumClass || undefined,
         metadata: Object.keys(metadata).length > 0 ? metadata : undefined,
       };
@@ -847,6 +851,9 @@ export function cleanInterfaceForExport(modelInterface: ModelInterface): CleanMo
     }
     if (sig.wheel_order && sig.wheel_order.length > 0) {
       clean.wheel_order = sig.wheel_order;
+    }
+    if (sig.enum_values) {
+      clean.enum_values = sig.enum_values;
     }
     if (sig.enum_class) {
       clean.enum_class = sig.enum_class;
