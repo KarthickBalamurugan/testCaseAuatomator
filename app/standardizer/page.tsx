@@ -104,7 +104,7 @@ export default function StandardizerPage() {
   const [fileName, setFileName] = useState("");
   const [rawInput, setRawInput] = useState(""); // for text/CSV fallback
   const [prompt, setPrompt] = useState(DEFAULT_STANDARDIZER_PROMPT);
-  const [model, setModel] = useState("gemini-3.5-flash-lite");
+  const [model, setModel] = useState("gemini-3.5-flash");
 
   // Output state
   const [groups, setGroups] = useState<RequirementGroup[]>([]);
@@ -544,11 +544,13 @@ export default function StandardizerPage() {
                   onChange={(e) => setModel(e.target.value)}
                   className={inputCls}
                 >
+                  <option value="gemini-3.5-flash">gemini-3.5-flash</option>
                   <option value="gemini-3.5-flash-lite">
                     gemini-3.5-flash-lite
                   </option>
-                  <option value="gemini-2.5-flash">gemini-2.5-flash</option>
-                  <option value="gemini-2.5-pro">gemini-2.5-pro</option>
+                  <option value="gemini-3.1-flash-lite">
+                    gemini-3.1-flash-lite
+                  </option>
                 </select>
               </div>
               <button

@@ -1,26 +1,23 @@
 "use client";
 
 import { useState, useMemo, useRef, useCallback } from "react";
-import * as XLSX from "xlsx";
 import {
   Upload,
   FileSpreadsheet,
   FileJson,
   X,
-  Loader2,
   Search,
   CheckCircle2,
   AlertCircle,
   ListChecks,
   Cable,
-  Sparkles,
   Code2,
-  ChevronDown,
-  ChevronRight,
   Copy,
   Check,
-  FileCode,
   Download,
+  Eye,
+  Sliders,
+  Layers,
 } from "lucide-react";
 import Navbar from "../components/Navbar";
 import { parseExcelWorkbook, type ParsedTestCase } from "@/lib/excelParser";
@@ -33,20 +30,17 @@ import {
 } from "@/lib/interfaceExcelParser";
 import InterfaceEditor from "./InterfaceEditor";
 import {
-  type RequirementGroup,
   type StandardizedTestCase,
 } from "@/lib/standardizer-types";
+import * as XLSX from "xlsx";
 
 /* ─── Styling Helpers ─────────────────────────────────────────── */
 
 const inputCls =
   "w-full rounded-lg border border-slate-700 bg-slate-800 px-3 py-2 text-sm text-slate-100 font-mono placeholder:text-slate-500 transition focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500/50";
 
-const btnPrimary =
-  "inline-flex items-center gap-2 rounded-lg bg-blue-600 px-5 py-2.5 text-sm font-semibold text-white shadow-lg transition hover:bg-blue-500 active:bg-blue-700 disabled:opacity-40 disabled:cursor-not-allowed";
-
 const btnSecondary =
-  "inline-flex items-center gap-2 rounded-lg border border-slate-600 bg-slate-800 px-4 py-2 text-sm text-slate-200 transition hover:bg-slate-700 active:bg-slate-900";
+  "inline-flex items-center gap-1.5 rounded-lg border border-slate-700 bg-slate-800/80 px-3 py-1.5 text-xs font-medium text-slate-200 transition hover:bg-slate-700 hover:text-white active:bg-slate-900";
 
 /* ─── Normalized internal representation ──────────────────────── */
 
@@ -63,13 +57,47 @@ interface NormalizedTestCase {
   notes: string;
 }
 
+export interface PreparedLLMInputPayload {
+  modelName: string;
+  configConstants?: string;
+  requirementScope: {
+    mode: "selected" | "all";
+    selectedIds?: string[];
+    requirementIds: string[];
+    totalRequirementsCount: number;
+    testCaseCount: number;
+  };
+  testCases: {
+    id: string;
+    requirementId: string;
+    title: string;
+    objective: string;
+    preconditions?: string;
+    passFailCriteria?: string;
+    priority?: string;
+    notes?: string;
+  }[];
+  interface: {
+    totalInputs: number;
+    totalOutputs: number;
+    inputPortNames: string[];
+    outputPortNames: string[];
+    flatPortSpecs: {
+      name: string;
+      ioRole: "Input" | "Output";
+      datatype?: string;
+      dimensions?: number[] | string | null;
+      signalType?: string;
+      enumValues?: string;
+    }[];
+    hierarchy?: Record<string, unknown>;
+  };
+}
+
 /* ─── Component ───────────────────────────────────────────────── */
 
 export default function TestGeneratorPage() {
   // Requirements state
-  const [reqSource, setReqSource] = useState<
-    "standardizer-xlsx" | "standardizer-json" | "parser-json"
-  >("standardizer-xlsx");
   const [reqFileName, setReqFileName] = useState("");
   const [allTestCases, setAllTestCases] = useState<NormalizedTestCase[]>([]);
   const [reqParseError, setReqParseError] = useState("");
@@ -80,25 +108,33 @@ export default function TestGeneratorPage() {
   const [interfaceParseError, setInterfaceParseError] = useState("");
   const [interfaceParseWarning, setInterfaceParseWarning] = useState("");
   const [interfaceConfirmed, setInterfaceConfirmed] = useState(false);
-  const [finalInterfaceJson, setFinalInterfaceJson] = useState<any | null>(null);
+  const [finalInterfaceJson, setFinalInterfaceJson] = useState<Record<string, unknown> | null>(null);
 
   // Model & selection
   const [modelName, setModelName] = useState("ESC_Stability_Controller");
-  const [reqId, setReqId] = useState("");
-  const [matched, setMatched] = useState<NormalizedTestCase[] | null>(null);
+  const [configConstants, setConfigConstants] = useState("");
+  const [searchQuery, setSearchQuery] = useState("");
+  const [selectedReqIds, setSelectedReqIds] = useState<string[]>([]);
   const [showAll, setShowAll] = useState(false);
 
-  // Generation state
-  const [isGenerating, setIsGenerating] = useState(false);
-  const [generateError, setGenerateError] = useState("");
-  const [generateSuccess, setGenerateSuccess] = useState("");
-  const [generatedCode, setGeneratedCode] = useState("");
-  const [showCode, setShowCode] = useState(false);
-  const [copied, setCopied] = useState(false);
+  // UI State for payload viewer
+  const [copiedPayload, setCopiedPayload] = useState(false);
+  const [activeTab, setActiveTab] = useState<"preview" | "payload" | "flow" | "matlab">("preview");
+
+  // Generation State
+  const [isGeneratingFlow, setIsGeneratingFlow] = useState(false);
+  const [generatedFlow, setGeneratedFlow] = useState<any[] | null>(null);
+  const [flowError, setFlowError] = useState("");
+  
+  const [isGeneratingMatlab, setIsGeneratingMatlab] = useState(false);
+  const [generatedMatlab, setGeneratedMatlab] = useState("");
+  const [matlabError, setMatlabError] = useState("");
 
   // Drag states
   const [isDraggingReqs, setIsDraggingReqs] = useState(false);
   const [isDraggingInterface, setIsDraggingInterface] = useState(false);
+  const [isDraggingConfig, setIsDraggingConfig] = useState(false);
+  const [configFileName, setConfigFileName] = useState("");
 
   const reqFileInputRef = useRef<HTMLInputElement>(null);
   const interfaceFileInputRef = useRef<HTMLInputElement>(null);
@@ -170,7 +206,74 @@ export default function TestGeneratorPage() {
   const outputPorts = flatPorts.outputs;
 
   const totalCount = allTestCases.length;
-  const matchCount = matched?.length ?? 0;
+
+  const activeTestCases = useMemo(() => {
+    if (showAll) return allTestCases;
+    if (selectedReqIds.length > 0) {
+      return allTestCases.filter((tc) =>
+        selectedReqIds.includes(tc.requirementId.trim())
+      );
+    }
+    return [];
+  }, [showAll, allTestCases, selectedReqIds]);
+
+  // Structured LLM Input Payload that captures everything fed into LLM
+  const preparedLLMPayload: PreparedLLMInputPayload = useMemo(() => {
+    const portSpecs = flatPorts.all.map((p) => ({
+      name: p.name,
+      ioRole: p.ioRole as "Input" | "Output",
+      datatype: p.datatype,
+      dimensions: p.dimensions,
+      signalType: p.signalType,
+      enumValues: p.enumValues,
+    }));
+
+    const structuredTestCases = activeTestCases.map((tc) => ({
+      id: tc.id,
+      requirementId: tc.requirementId,
+      title: tc.title,
+      objective: tc.objective,
+      preconditions: tc.preconditions || undefined,
+      passFailCriteria: tc.passFailCriteria || undefined,
+      priority: tc.priority || undefined,
+      notes: tc.notes || undefined,
+    }));
+
+    const cleanedHierarchy = finalInterfaceJson ?? (interfaceState ? cleanInterfaceForExport(interfaceState) : undefined);
+
+    return {
+      modelName: modelName.trim(),
+      configConstants: configConstants.trim() || undefined,
+      requirementScope: {
+        mode: showAll ? "all" : "selected",
+        selectedIds: showAll ? undefined : selectedReqIds,
+        requirementIds: showAll ? uniqueReqIds : selectedReqIds,
+        totalRequirementsCount: showAll ? uniqueReqIds.length : selectedReqIds.length,
+        testCaseCount: structuredTestCases.length,
+      },
+      testCases: structuredTestCases,
+      interface: {
+        totalInputs: inputPorts.length,
+        totalOutputs: outputPorts.length,
+        inputPortNames: inputPorts.map((p) => p.name),
+        outputPortNames: outputPorts.map((p) => p.name),
+        flatPortSpecs: portSpecs,
+        hierarchy: cleanedHierarchy as Record<string, unknown> | undefined,
+      },
+    };
+  }, [
+    modelName,
+    configConstants,
+    showAll,
+    selectedReqIds,
+    uniqueReqIds,
+    activeTestCases,
+    flatPorts.all,
+    inputPorts,
+    outputPorts,
+    finalInterfaceJson,
+    interfaceState,
+  ]);
 
   /* ─── Normalization helpers ──────────────────────────────── */
 
@@ -212,11 +315,9 @@ export default function TestGeneratorPage() {
     setReqParseError("");
     setReqFileName("");
     setAllTestCases([]);
-    setMatched(null);
-    setReqId("");
+    setSearchQuery("");
+    setSelectedReqIds([]);
     setShowAll(false);
-    setGenerateError("");
-    setGenerateSuccess("");
 
     const ext = file.name.split(".").pop()?.toLowerCase();
 
@@ -327,15 +428,15 @@ export default function TestGeneratorPage() {
     [processReqFile]
   );
 
+
+
   const clearReqs = () => {
     setReqFileName("");
     setAllTestCases([]);
-    setMatched(null);
-    setReqId("");
+    setSearchQuery("");
+    setSelectedReqIds([]);
     setShowAll(false);
-    setGenerateError("");
-    setGenerateSuccess("");
-    setGeneratedCode("");
+    setReqParseError("");
   };
 
   /* ─── Interface file handling ────────────────────────────── */
@@ -347,8 +448,6 @@ export default function TestGeneratorPage() {
     setInterfaceState(null);
     setInterfaceConfirmed(false);
     setFinalInterfaceJson(null);
-    setGenerateError("");
-    setGenerateSuccess("");
 
     const ext = file.name.split(".").pop()?.toLowerCase();
 
@@ -414,137 +513,160 @@ export default function TestGeneratorPage() {
     setInterfaceParseError("");
   };
 
-  /* ─── Requirement selection ──────────────────────────────── */
+  /* ─── Configuration Constants file handling ──────────────── */
 
-  const handleReqIdChange = (value: string) => {
-    setReqId(value);
-    setShowAll(false);
-    setGenerateError("");
-    setGenerateSuccess("");
-    const trimmed = value.trim().toLowerCase();
-    if (!trimmed) {
-      setMatched(null);
+  const processConfigFile = useCallback(async (file: File) => {
+    const ext = file.name.split(".").pop()?.toLowerCase();
+    if (ext !== "xlsx" && ext !== "xls") {
+      alert("Please upload a valid Excel file (.xlsx or .xls)");
       return;
     }
-    setMatched(
-      allTestCases.filter(
-        (tc) => tc.requirementId.trim().toLowerCase() === trimmed
-      )
+
+    try {
+      const buffer = await file.arrayBuffer();
+      const workbook = XLSX.read(buffer, { type: "array" });
+      const firstSheetName = workbook.SheetNames[0];
+      const worksheet = workbook.Sheets[firstSheetName];
+      
+      // Convert to JSON, array of arrays
+      const jsonData = XLSX.utils.sheet_to_json<any[]>(worksheet, { header: 1 });
+      
+      let constantsText = "";
+      for (const row of jsonData) {
+        if (Array.isArray(row) && row.length >= 1) {
+          const name = String(row[0] || "").trim();
+          if (name) {
+            constantsText += `${name}\n`;
+          }
+        }
+      }
+
+      setConfigConstants(constantsText.trim());
+      setConfigFileName(file.name);
+    } catch (error) {
+      console.error("Failed to parse config file:", error);
+      alert("Failed to parse the configuration constants file.");
+    }
+  }, []);
+
+  const handleConfigFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (file) processConfigFile(file);
+    e.target.value = "";
+  };
+
+  const handleConfigDrop = useCallback(
+    (e: React.DragEvent) => {
+      e.preventDefault();
+      setIsDraggingConfig(false);
+      const file = e.dataTransfer.files[0];
+      if (file) processConfigFile(file);
+    },
+    [processConfigFile]
+  );
+
+  /* ─── Requirement selection ──────────────────────────────── */
+
+  const handleReqIdToggle = (id: string) => {
+    if (showAll) {
+      setShowAll(false);
+      setSelectedReqIds([id]);
+      return;
+    }
+    setSelectedReqIds((prev) =>
+      prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]
     );
   };
 
   const handleSelectAll = () => {
-    setReqId("");
+    setSearchQuery("");
+    setSelectedReqIds([]);
     setShowAll(true);
-    setMatched(allTestCases);
-    setGenerateError("");
-    setGenerateSuccess("");
   };
 
-  /* ─── Generate ───────────────────────────────────────────── */
+  const handleCopyPayload = () => {
+    navigator.clipboard.writeText(JSON.stringify(preparedLLMPayload, null, 2));
+    setCopiedPayload(true);
+    setTimeout(() => setCopiedPayload(false), 2000);
+  };
 
-  const handleGenerate = async () => {
-    setGenerateError("");
-    setGenerateSuccess("");
-    setGeneratedCode("");
+  const handleDownloadPayload = () => {
+    const jsonStr = JSON.stringify(preparedLLMPayload, null, 2);
+    const blob = new Blob([jsonStr], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    const safeModel = (modelName.trim() || "Model").replace(/[^a-zA-Z0-9_-]/g, "_");
+    const scopeStr = showAll ? "ALL_REQS" : (selectedReqIds.length > 0 ? selectedReqIds.join("_").replace(/[^a-zA-Z0-9_-]/g, "_") : "NO_SCOPE");
+    a.download = `LLM_Input_Payload_${safeModel}_${scopeStr}.json`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  };
 
-    if (!modelName.trim()) {
-      setGenerateError("Enter a model name.");
+  /* ─── Generation Handlers ────────────────────────────────── */
+
+  const handleGenerateFlow = async () => {
+    if (activeTestCases.length === 0) {
+      setFlowError("No test cases selected.");
       return;
     }
-    if (inputPorts.length === 0) {
-      setGenerateError("Upload a ports workbook with at least one Input port.");
-      return;
-    }
-    if (!showAll && (!reqId.trim() || !matched || matched.length === 0)) {
-      setGenerateError("Select a requirement ID with matching test cases.");
-      return;
-    }
+    
+    setIsGeneratingFlow(true);
+    setFlowError("");
+    setGeneratedFlow(null);
+    setActiveTab("flow");
 
-    const portNames = inputPorts.map((p) => p.name);
-    const portSpecs = flatPorts.all.map((p) => ({
-      name: p.name,
-      ioRole: p.ioRole,
-      datatype: p.datatype,
-      dimensions: p.dimensions,
-      signalType: p.signalType,
-      enumValues: p.enumValues,
-    }));
-
-    const activeCases = showAll ? allTestCases : matched!;
-
-    // Build structured test cases for the API
-    const structuredTestCases = activeCases.map((tc) => ({
-      id: tc.id,
-      title: tc.title,
-      objective: tc.objective,
-      criteria: tc.passFailCriteria,
-      ...(showAll ? { requirementId: tc.requirementId } : {}),
-    }));
-
-    const payload: Record<string, unknown> = {
-      modelName: modelName.trim(),
-      testCases: structuredTestCases,
-      ports: portNames,
-      portSpecs,
-      interfaceJson: finalInterfaceJson ?? cleanInterfaceForExport(interfaceState!),
-      count: activeCases.length,
-    };
-
-    if (showAll) {
-      payload.requirementIds = uniqueReqIds;
-    } else {
-      payload.requirementId = reqId.trim();
-    }
-
-    setIsGenerating(true);
     try {
-      const res = await fetch("/api/generate-testsuite", {
+      const res = await fetch("/api/generate-flow", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
+        body: JSON.stringify(preparedLLMPayload),
       });
 
-      if (!res.ok) {
-        const errBody = await res.json().catch(() => ({}));
-        throw new Error(errBody.error || `Request failed with status ${res.status}`);
-      }
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Failed to generate flow");
 
-      // Response is the .m file as plain text
-      const matlabCode = await res.text();
-      setGeneratedCode(matlabCode);
-
-      // Also download the file
-      const blob = new Blob([matlabCode], { type: "text/plain" });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      const safeFileId = showAll
-        ? "ALL"
-        : reqId.trim().replace(/[^a-zA-Z0-9._-]/g, "_");
-      a.download = `MBD_TestSuite_${safeFileId}.m`;
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      URL.revokeObjectURL(url);
-
-      const reqLabel = showAll
-        ? `${uniqueReqIds.length} requirements · ${allTestCases.length} test cases`
-        : `${reqId.trim()} · ${matched!.length} test cases`;
-      setGenerateSuccess(`Downloaded: MBD_TestSuite_${safeFileId}.m (${reqLabel})`);
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : "Generation failed.";
-      setGenerateError(msg);
+      setGeneratedFlow(data.flow);
+    } catch (err: any) {
+      setFlowError(err.message);
     } finally {
-      setIsGenerating(false);
+      setIsGeneratingFlow(false);
     }
   };
 
-  const handleCopyCode = () => {
-    if (!generatedCode) return;
-    navigator.clipboard.writeText(generatedCode);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
+  const handleGenerateMatlab = async () => {
+    if (!generatedFlow) {
+      setMatlabError("No verified test case flow available.");
+      return;
+    }
+
+    setIsGeneratingMatlab(true);
+    setMatlabError("");
+    setGeneratedMatlab("");
+    setActiveTab("matlab");
+
+    try {
+      const res = await fetch("/api/generate-matlab", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          flow: generatedFlow,
+          interface: preparedLLMPayload.interface,
+          configConstants: preparedLLMPayload.configConstants,
+        }),
+      });
+
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Failed to generate MATLAB script");
+
+      setGeneratedMatlab(data.script);
+    } catch (err: any) {
+      setMatlabError(err.message);
+    } finally {
+      setIsGeneratingMatlab(false);
+    }
   };
 
   /* ─── Render ─────────────────────────────────────────────── */
@@ -556,26 +678,48 @@ export default function TestGeneratorPage() {
     <div className="min-h-screen bg-slate-950 text-slate-100">
       <Navbar />
 
-      <main className="mx-auto max-w-6xl px-4 py-8">
+      <main className="mx-auto max-w-7xl px-4 py-8">
         {/* Page Header */}
-        <div className="mb-8 flex items-center gap-3">
-          <Code2 className="h-8 w-8 text-blue-400" />
-          <div>
-            <h1 className="text-3xl font-bold tracking-tight text-white">
-              Test Generator
-            </h1>
-            <p className="mt-1 text-sm text-slate-400">
-              Feed standardized test requirements and I/O ports to the LLM to
-              generate a MATLAB Simulink test suite.
-            </p>
+        <div className="mb-8 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+          <div className="flex items-center gap-3">
+            <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-blue-600/10 border border-blue-500/20 text-blue-400">
+              <Code2 className="h-6 w-6" />
+            </div>
+            <div>
+              <h1 className="text-2xl font-bold tracking-tight text-white">
+                Test Generator - Input Feeder & Staging
+              </h1>
+              <p className="mt-0.5 text-xs text-slate-400">
+                Feed standardized test requirements and Simulink I/O interfaces to stage the exact payload for LLM processing.
+              </p>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => setActiveTab(activeTab === "preview" ? "payload" : "preview")}
+              className="inline-flex items-center gap-1.5 rounded-lg border border-slate-700 bg-slate-800/80 px-3 py-2 text-xs font-medium text-slate-200 hover:bg-slate-700 hover:text-white transition"
+            >
+              {activeTab === "preview" ? (
+                <>
+                  <Sliders className="h-3.5 w-3.5 text-blue-400" />
+                  Inspect LLM Staged Payload
+                </>
+              ) : (
+                <>
+                  <Eye className="h-3.5 w-3.5 text-emerald-400" />
+                  View Test Cases ({activeTestCases.length})
+                </>
+              )}
+            </button>
           </div>
         </div>
 
-        {/* ─── INPUTS ─────────────────────────────────────────── */}
+        {/* ─── MAIN 2-COLUMN GRID ─────────────────────────────── */}
 
-        <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
-          {/* LEFT COLUMN: Inputs */}
-          <div className="space-y-4">
+        <div className="grid grid-cols-1 gap-6 lg:grid-cols-12">
+          {/* LEFT COLUMN: Inputs (5 Cols) */}
+          <div className="lg:col-span-5 space-y-4">
             {/* Model Name */}
             <div className="rounded-xl border border-slate-800 bg-slate-900/60 p-4">
               <label className="text-[11px] font-medium uppercase tracking-wider text-slate-400 mb-1.5 block">
@@ -590,15 +734,78 @@ export default function TestGeneratorPage() {
               />
             </div>
 
+            {/* Configuration Constants */}
+            <div className="rounded-xl border border-slate-800 bg-slate-900/60 p-4">
+              <div className="flex items-center justify-between mb-3">
+                <label className="text-[11px] font-medium uppercase tracking-wider text-slate-400">
+                  Configuration Constants
+                </label>
+              </div>
+
+              {!configFileName ? (
+                <label
+                  onDrop={handleConfigDrop}
+                  onDragOver={(e) => {
+                    e.preventDefault();
+                    setIsDraggingConfig(true);
+                  }}
+                  onDragLeave={(e) => {
+                    e.preventDefault();
+                    setIsDraggingConfig(false);
+                  }}
+                  className={`flex items-center gap-2.5 rounded-lg border-2 border-dashed px-3 py-3 cursor-pointer transition-all text-sm mb-3 ${
+                    isDraggingConfig
+                      ? "border-blue-500 bg-blue-500/10"
+                      : "border-slate-700 bg-slate-800 hover:border-slate-600"
+                  }`}
+                >
+                  <Upload className="h-4 w-4 text-slate-400 shrink-0" />
+                  <span className="text-slate-300">
+                    Drop Constants Excel (.xlsx, .xls)
+                  </span>
+                  <input
+                    type="file"
+                    accept=".xlsx,.xls"
+                    onChange={handleConfigFileChange}
+                    className="hidden"
+                  />
+                </label>
+              ) : (
+                <div className="flex items-center gap-2 rounded-lg border border-blue-500/30 bg-blue-500/10 px-3 py-2 mb-3">
+                  <FileSpreadsheet className="h-4 w-4 text-blue-400 shrink-0" />
+                  <span className="text-sm text-blue-300 truncate flex-1 font-mono">
+                    {configFileName}
+                  </span>
+                  <button
+                    onClick={() => {
+                      setConfigFileName("");
+                      setConfigConstants("");
+                    }}
+                    className="text-slate-400 hover:text-white transition shrink-0 p-1"
+                    title="Clear file"
+                  >
+                    <X className="h-3.5 w-3.5" />
+                  </button>
+                </div>
+              )}
+
+              <textarea
+                value={configConstants}
+                onChange={(e) => setConfigConstants(e.target.value)}
+                placeholder="e.g. K_MAX_SPEED&#10;K_MIN_SPEED"
+                className={inputCls + " min-h-[80px] resize-y"}
+              />
+            </div>
+
             {/* Requirements Upload */}
             <div className="rounded-xl border border-slate-800 bg-slate-900/60 p-4">
               <div className="flex items-center justify-between mb-3">
                 <label className="text-[11px] font-medium uppercase tracking-wider text-slate-400">
-                  Test Requirements
+                  Test Requirements Document
                 </label>
                 {hasReqs && (
                   <span className="text-xs text-emerald-400 font-mono">
-                    {totalCount} test cases · {uniqueReqIds.length} reqs
+                    {totalCount} cases · {uniqueReqIds.length} reqs
                   </span>
                 )}
               </div>
@@ -622,7 +829,7 @@ export default function TestGeneratorPage() {
                 >
                   <Upload className="h-4 w-4 text-slate-400 shrink-0" />
                   <span className="text-slate-300">
-                    Drop .xlsx (Standardized) or .json (Standardizer/Parser)
+                    Drop .xlsx (Standardized) or .json
                   </span>
                   <input
                     ref={reqFileInputRef}
@@ -635,7 +842,7 @@ export default function TestGeneratorPage() {
               ) : (
                 <div className="flex items-center gap-2 rounded-lg border border-blue-500/30 bg-blue-500/10 px-3 py-2">
                   <FileSpreadsheet className="h-4 w-4 text-blue-400 shrink-0" />
-                  <span className="text-sm text-blue-300 truncate flex-1">
+                  <span className="text-sm text-blue-300 truncate flex-1 font-mono">
                     {reqFileName}
                   </span>
                   <span className="text-xs text-emerald-400 font-mono shrink-0">
@@ -643,7 +850,8 @@ export default function TestGeneratorPage() {
                   </span>
                   <button
                     onClick={clearReqs}
-                    className="text-slate-400 hover:text-white transition shrink-0"
+                    className="text-slate-400 hover:text-white transition shrink-0 p-1"
+                    title="Clear file"
                   >
                     <X className="h-3.5 w-3.5" />
                   </button>
@@ -659,30 +867,34 @@ export default function TestGeneratorPage() {
 
               {hasReqs && (
                 <p className="mt-2 text-[11px] text-slate-500">
-                  Accepted: Standardized Excel (from Standardizer page) or JSON
-                  output from the Parser or Standardizer.
+                  Parsed: Standardized Excel or JSON with objectives, preconditions & pass/fail criteria.
                 </p>
               )}
             </div>
 
-            {/* Requirement Selection */}
+            {/* Requirement Scope Selector */}
             {hasReqs && (
               <div className="rounded-xl border border-slate-800 bg-slate-900/60 p-4">
-                <label className="text-[11px] font-medium uppercase tracking-wider text-slate-400 mb-1.5 block">
-                  Requirement ID
-                </label>
+                <div className="flex items-center justify-between mb-2">
+                  <label className="text-[11px] font-medium uppercase tracking-wider text-slate-400">
+                    Requirement Scope
+                  </label>
+                  <span className="text-[11px] text-blue-400 font-mono">
+                    {activeTestCases.length} case{activeTestCases.length === 1 ? "" : "s"} active
+                  </span>
+                </div>
                 <div className="relative mb-3">
                   <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-slate-500" />
                   <input
                     type="text"
-                    value={reqId}
-                    onChange={(e) => handleReqIdChange(e.target.value)}
-                    placeholder="REQ-IB_BHMS-SC-PSB-002"
+                    value={searchQuery}
+                    onChange={(e) => setSearchQuery(e.target.value)}
+                    placeholder="Search requirement IDs..."
                     className={inputCls + " pl-9 pr-8"}
                   />
-                  {reqId && (
+                  {searchQuery && (
                     <button
-                      onClick={() => handleReqIdChange("")}
+                      onClick={() => setSearchQuery("")}
                       className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-500 hover:text-white transition"
                     >
                       <X className="h-3.5 w-3.5" />
@@ -690,10 +902,10 @@ export default function TestGeneratorPage() {
                   )}
                 </div>
 
-                <div className="flex flex-wrap gap-1 max-h-28 overflow-y-auto">
+                <div className="flex flex-wrap gap-1 max-h-32 overflow-y-auto pr-1">
                   <button
                     onClick={handleSelectAll}
-                    className={`rounded-md px-2 py-0.5 text-xs font-medium transition-all inline-flex items-center gap-1 ${
+                    className={`rounded-md px-2 py-1 text-xs font-medium transition-all inline-flex items-center gap-1 ${
                       showAll
                         ? "bg-emerald-600 text-white"
                         : "bg-slate-800 text-slate-400 hover:bg-slate-700 hover:text-slate-200"
@@ -702,19 +914,23 @@ export default function TestGeneratorPage() {
                     <ListChecks className="h-3 w-3" />
                     All ({totalCount})
                   </button>
-                  {uniqueReqIds.map((id) => (
-                    <button
-                      key={id}
-                      onClick={() => handleReqIdChange(id)}
-                      className={`rounded-md px-2 py-0.5 text-xs font-mono transition-all ${
-                        reqId.trim().toLowerCase() === id.toLowerCase()
-                          ? "bg-blue-600 text-white"
-                          : "bg-slate-800 text-slate-400 hover:bg-slate-700 hover:text-slate-200"
-                      }`}
-                    >
-                      {id}
-                    </button>
-                  ))}
+                  {uniqueReqIds
+                    .filter((id) =>
+                      id.toLowerCase().includes(searchQuery.toLowerCase())
+                    )
+                    .map((id) => (
+                      <button
+                        key={id}
+                        onClick={() => handleReqIdToggle(id)}
+                        className={`rounded-md px-2 py-1 text-xs font-mono transition-all ${
+                          selectedReqIds.includes(id) && !showAll
+                            ? "bg-blue-600 text-white"
+                            : "bg-slate-800 text-slate-400 hover:bg-slate-700 hover:text-slate-200"
+                        }`}
+                      >
+                        {id}
+                      </button>
+                    ))}
                 </div>
               </div>
             )}
@@ -725,7 +941,7 @@ export default function TestGeneratorPage() {
                 <div className="flex items-center gap-2">
                   <Cable className="h-4 w-4 text-blue-400" />
                   <label className="text-[11px] font-medium uppercase tracking-wider text-slate-400">
-                    Input / Output Document
+                    Simulink I/O Interface
                   </label>
                 </div>
                 {interfaceState && (
@@ -769,7 +985,7 @@ export default function TestGeneratorPage() {
                       Drop Interface Excel (.xlsx, .xls)
                     </span>
                     <span className="text-xs text-slate-500 mt-1 text-center">
-                      Auto-detects buses, nested hierarchy, ports, datatypes, dimensions, signal types & metadata
+                      Auto-detects buses, nested hierarchy, ports, datatypes, dimensions & signal types
                     </span>
                     <input
                       ref={interfaceFileInputRef}
@@ -838,123 +1054,174 @@ export default function TestGeneratorPage() {
               )}
             </div>
 
-            {/* Generate Button */}
-            <div className="rounded-xl border border-slate-800 bg-slate-900/60 p-4">
-              <div className="flex items-center justify-between gap-3">
-                <div>
-                  <p className="text-sm font-medium text-slate-200">
-                    Generate MATLAB Test Suite
-                  </p>
-                  <p className="text-xs text-slate-500">
-                    {showAll
-                      ? `All ${uniqueReqIds.length} requirements · ${totalCount} test cases`
-                      : matched
-                      ? `${matched.length} test case${matched.length !== 1 ? "s" : ""} selected`
-                      : "Select a requirement to proceed"}
-                  </p>
-                </div>
-                <button
-                  onClick={handleGenerate}
-                  disabled={isGenerating || !hasReqs || !hasPorts}
-                  className={btnPrimary}
-                >
-                  {isGenerating ? (
-                    <>
-                      <Loader2 className="h-4 w-4 animate-spin" />
-                      Generating...
-                    </>
-                  ) : (
-                    <>
-                      <Sparkles className="h-4 w-4" />
-                      {showAll ? "Generate All" : "Generate"}
-                    </>
-                  )}
-                </button>
-              </div>
-
-              {generateError && (
-                <div className="mt-3 flex items-center gap-1.5 text-xs text-red-400">
-                  <AlertCircle className="h-3.5 w-3.5 shrink-0" />
-                  {generateError}
-                </div>
-              )}
-              {generateSuccess && (
-                <div className="mt-3 flex items-center gap-1.5 text-xs text-emerald-400">
-                  <CheckCircle2 className="h-3.5 w-3.5 shrink-0" />
-                  {generateSuccess}
-                </div>
+            {/* Generate Flow Button */}
+            <div className="pt-4">
+              <button
+                onClick={handleGenerateFlow}
+                disabled={isGeneratingFlow || activeTestCases.length === 0}
+                className={`w-full py-3 rounded-xl font-medium text-sm transition-all flex items-center justify-center gap-2 ${
+                  isGeneratingFlow || activeTestCases.length === 0
+                    ? "bg-slate-800 text-slate-500 cursor-not-allowed"
+                    : "bg-blue-600 text-white hover:bg-blue-500 shadow-lg shadow-blue-900/20"
+                }`}
+              >
+                {isGeneratingFlow ? (
+                  <>
+                    <div className="h-4 w-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                    Generating Stage 1: Test Case Flow...
+                  </>
+                ) : (
+                  <>
+                    <Code2 className="h-4 w-4" />
+                    Generate Stage 1: Test Case Flow
+                  </>
+                )}
+              </button>
+              {flowError && (
+                <p className="mt-2 text-xs text-red-400 text-center">{flowError}</p>
               )}
             </div>
           </div>
 
-          {/* RIGHT COLUMN: Preview + Generated Code */}
-          <div className="space-y-4">
-            {/* Test Case Preview */}
-            <div className="rounded-xl border border-slate-800 bg-slate-900/60 p-4">
-              <div className="flex items-center justify-between mb-3">
-                <h2 className="text-[11px] font-medium uppercase tracking-wider text-slate-400">
-                  {showAll ? "All Test Cases" : "Test Case Preview"}
-                </h2>
-                {matched !== null && (
-                  <span className="text-xs font-mono text-blue-400">
-                    {showAll
-                      ? `${matchCount} cases · ${uniqueReqIds.length} reqs`
-                      : `${matchCount} result${matchCount === 1 ? "" : "s"}`}
-                  </span>
-                )}
+          {/* RIGHT COLUMN: Output Staging & Inspector (7 Cols) */}
+          <div className="lg:col-span-7 space-y-4">
+            {/* Header Tabs */}
+            <div className="flex items-center justify-between border-b border-slate-800 pb-2">
+              <div className="flex gap-2 overflow-x-auto pb-1">
+                <button
+                  onClick={() => setActiveTab("preview")}
+                  className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition whitespace-nowrap ${
+                    activeTab === "preview"
+                      ? "bg-blue-600/20 text-blue-300 border border-blue-500/30"
+                      : "text-slate-400 hover:text-slate-200 hover:bg-slate-800"
+                  }`}
+                >
+                  <Eye className="h-3.5 w-3.5" />
+                  Active Test Cases ({activeTestCases.length})
+                </button>
+                <button
+                  onClick={() => setActiveTab("payload")}
+                  className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition whitespace-nowrap ${
+                    activeTab === "payload"
+                      ? "bg-purple-600/20 text-purple-300 border border-purple-500/30"
+                      : "text-slate-400 hover:text-slate-200 hover:bg-slate-800"
+                  }`}
+                >
+                  <Layers className="h-3.5 w-3.5" />
+                  LLM Payload
+                </button>
+                <button
+                  onClick={() => setActiveTab("flow")}
+                  className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition whitespace-nowrap ${
+                    activeTab === "flow"
+                      ? "bg-amber-600/20 text-amber-300 border border-amber-500/30"
+                      : "text-slate-400 hover:text-slate-200 hover:bg-slate-800"
+                  }`}
+                >
+                  <ListChecks className="h-3 w-3" />
+                  Stage 1: Flow
+                </button>
+                <button
+                  onClick={() => setActiveTab("matlab")}
+                  className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition whitespace-nowrap ${
+                    activeTab === "matlab"
+                      ? "bg-emerald-600/20 text-emerald-300 border border-emerald-500/30"
+                      : "text-slate-400 hover:text-slate-200 hover:bg-slate-800"
+                  }`}
+                >
+                  <Code2 className="h-3 w-3" />
+                  Stage 2: MATLAB
+                </button>
               </div>
 
-              {matched === null ? (
-                <div className="flex min-h-[250px] flex-col items-center justify-center text-center px-6">
-                  <div>
-                    <p className="text-sm text-slate-500">
-                      {hasReqs
-                        ? "Search a requirement to preview test cases"
-                        : "Upload test requirements to get started"}
-                    </p>
-                    <p className="text-xs text-slate-600 mt-1">
-                      {hasReqs
-                        ? `${totalCount} cases loaded`
-                        : "Supports Standardized Excel or JSON from Parser/Standardizer"}
+              {activeTab === "payload" && (
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={handleCopyPayload}
+                    className={btnSecondary}
+                    title="Copy staged payload JSON"
+                  >
+                    {copiedPayload ? (
+                      <>
+                        <Check className="h-3.5 w-3.5 text-emerald-400" />
+                        Copied!
+                      </>
+                    ) : (
+                      <>
+                        <Copy className="h-3.5 w-3.5" />
+                        Copy JSON
+                      </>
+                    )}
+                  </button>
+                  <button
+                    onClick={handleDownloadPayload}
+                    className={btnSecondary}
+                    title="Download staged payload JSON"
+                  >
+                    <Download className="h-3.5 w-3.5" />
+                    Download JSON
+                  </button>
+                </div>
+              )}
+            </div>
+
+            {/* Tab 1: Active Test Cases Preview */}
+            {activeTab === "preview" && (
+              <div className="rounded-xl border border-slate-800 bg-slate-900/60 p-4">
+                <div className="flex items-center justify-between mb-3">
+                  <h2 className="text-[11px] font-medium uppercase tracking-wider text-slate-400">
+                    {showAll ? "All Test Cases" : selectedReqIds.length > 0 ? `Test Cases for ${selectedReqIds.join(", ")}` : "Test Case Preview"}
+                  </h2>
+                  {activeTestCases.length > 0 && (
+                    <span className="text-xs font-mono text-blue-400">
+                      {activeTestCases.length} case{activeTestCases.length === 1 ? "" : "s"} staged
+                    </span>
+                  )}
+                </div>
+
+                {!hasReqs ? (
+                  <div className="flex min-h-[300px] flex-col items-center justify-center text-center px-6">
+                    <Upload className="h-10 w-10 text-slate-700 mb-3" />
+                    <p className="text-sm text-slate-400 font-medium">No Requirements Loaded</p>
+                    <p className="text-xs text-slate-500 mt-1 max-w-sm">
+                      Upload a standardized test requirement Excel file or JSON to inspect test cases and stage them for LLM ingestion.
                     </p>
                   </div>
-                </div>
-              ) : matched.length === 0 ? (
-                <div className="flex min-h-[250px] flex-col items-center justify-center text-center px-6">
-                  <p className="text-sm text-amber-400">No matches</p>
-                  <p className="text-xs text-slate-500 mt-1">
-                    &quot;{reqId}&quot; not found in the loaded data
-                  </p>
-                </div>
-              ) : (
-                <div className="space-y-2 overflow-y-auto max-h-[400px] pr-1">
-                  {matched.map((tc, i) => (
-                    <div
-                      key={`${tc.id}-${i}`}
-                      className="rounded-lg border border-slate-800 bg-slate-800/40 p-3 hover:border-slate-700 transition"
-                    >
-                      <div className="flex items-start justify-between gap-2 mb-1">
-                        <div>
-                          {showAll && (
-                            <span className="text-[10px] font-mono text-slate-500 block mb-0.5">
-                              {tc.requirementId}
-                            </span>
-                          )}
-                          <span className="font-mono text-xs font-semibold text-blue-400">
-                            {tc.id}
-                          </span>
-                          <p className="text-xs text-slate-200 mt-0.5">
-                            {tc.title || "Untitled"}
-                          </p>
-                        </div>
-                        <div className="flex items-center gap-1 shrink-0">
+                ) : activeTestCases.length === 0 ? (
+                  <div className="flex min-h-[300px] flex-col items-center justify-center text-center px-6">
+                    <p className="text-sm text-amber-400 font-medium">No matching test cases</p>
+                    <p className="text-xs text-slate-500 mt-1">
+                      No test cases matched the selected requirements. Select an existing requirement from the list on the left.
+                    </p>
+                  </div>
+                ) : (
+                  <div className="space-y-3 overflow-y-auto max-h-[600px] pr-1">
+                    {activeTestCases.map((tc, idx) => (
+                      <div
+                        key={`${tc.id}-${idx}`}
+                        className="rounded-lg border border-slate-800 bg-slate-800/40 p-3.5 hover:border-slate-700 transition"
+                      >
+                        <div className="flex items-start justify-between gap-2 mb-1.5">
+                          <div>
+                            <div className="flex items-center gap-2">
+                              <span className="font-mono text-xs font-bold text-blue-400">
+                                {tc.id}
+                              </span>
+                              <span className="text-[10px] font-mono bg-slate-800 text-slate-400 px-1.5 py-0.5 rounded border border-slate-700">
+                                {tc.requirementId}
+                              </span>
+                            </div>
+                            <p className="text-xs font-medium text-slate-200 mt-1">
+                              {tc.title || "Untitled Test Case"}
+                            </p>
+                          </div>
                           {tc.priority && (
                             <span
-                              className={`text-[10px] font-medium px-1.5 py-0.5 rounded ${
+                              className={`text-[10px] font-medium px-2 py-0.5 rounded shrink-0 ${
                                 tc.priority.toLowerCase() === "high"
-                                  ? "bg-red-500/15 text-red-400"
+                                  ? "bg-red-500/15 text-red-400 border border-red-500/20"
                                   : tc.priority.toLowerCase() === "medium"
-                                  ? "bg-amber-500/15 text-amber-400"
+                                  ? "bg-amber-500/15 text-amber-400 border border-amber-500/20"
                                   : "bg-slate-700/50 text-slate-400"
                               }`}
                             >
@@ -962,103 +1229,187 @@ export default function TestGeneratorPage() {
                             </span>
                           )}
                         </div>
-                      </div>
-                      {tc.objective && (
-                        <p className="text-[11px] text-slate-400 mt-1 line-clamp-2">
-                          {tc.objective}
-                        </p>
-                      )}
-                      {tc.passFailCriteria && (
-                        <p className="text-[11px] text-slate-500 mt-1 italic">
-                          Pass/Fail: {tc.passFailCriteria}
-                        </p>
-                      )}
-                    </div>
-                  ))}
-                </div>
-              )}
-            </div>
 
-            {/* Generated Code Preview */}
-            {generatedCode && (
-              <div className="rounded-xl border border-blue-800/30 bg-blue-950/10 p-4">
-                <div className="flex items-center justify-between mb-3">
-                  <h2 className="text-[11px] font-medium uppercase tracking-wider text-blue-300 inline-flex items-center gap-1.5">
-                    <FileJson className="h-3.5 w-3.5" />
-                    Generated MATLAB Code
-                  </h2>
-                  <div className="flex gap-2">
-                    <button
-                      onClick={handleCopyCode}
-                      className={btnSecondary}
-                    >
-                      {copied ? (
-                        <>
-                          <Check className="h-3.5 w-3.5 text-green-400" />
-                          Copied!
-                        </>
-                      ) : (
-                        <>
-                          <Copy className="h-3.5 w-3.5" />
-                          Copy
-                        </>
-                      )}
-                    </button>
-                    <button
-                      onClick={() => setShowCode(!showCode)}
-                      className={btnSecondary}
-                    >
-                      {showCode ? (
-                        <>
-                          <ChevronDown className="h-3.5 w-3.5" />
-                          Collapse
-                        </>
-                      ) : (
-                        <>
-                          <ChevronRight className="h-3.5 w-3.5" />
-                          Expand
-                        </>
-                      )}
-                    </button>
+                        {tc.objective && (
+                          <div className="mt-2 text-xs text-slate-300">
+                            <span className="text-[10px] font-semibold uppercase text-slate-500 block mb-0.5">Objective</span>
+                            <p className="text-slate-300 leading-relaxed bg-slate-900/60 p-2 rounded border border-slate-800/80 font-mono text-[11px]">
+                              {tc.objective}
+                            </p>
+                          </div>
+                        )}
+
+                        {tc.preconditions && (
+                          <div className="mt-2 text-xs text-slate-400">
+                            <span className="text-[10px] font-semibold uppercase text-slate-500 block mb-0.5">Preconditions</span>
+                            <p className="text-slate-400 leading-relaxed text-[11px]">
+                              {tc.preconditions}
+                            </p>
+                          </div>
+                        )}
+
+                        {tc.passFailCriteria && (
+                          <div className="mt-2 text-xs text-slate-400">
+                            <span className="text-[10px] font-semibold uppercase text-emerald-500/80 block mb-0.5">Pass/Fail Criteria</span>
+                            <p className="text-emerald-400/90 leading-relaxed text-[11px] font-mono">
+                              {tc.passFailCriteria}
+                            </p>
+                          </div>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Tab 2: Staged LLM Payload Inspector */}
+            {activeTab === "payload" && (
+              <div className="rounded-xl border border-purple-900/30 bg-slate-900/80 p-4 space-y-4">
+                {/* Summary Badges */}
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                  <div className="rounded-lg bg-slate-800/60 border border-slate-700/60 p-2.5">
+                    <span className="text-[10px] uppercase font-semibold text-slate-400 block">Model</span>
+                    <span className="text-xs font-mono font-bold text-blue-300 truncate block">
+                      {preparedLLMPayload.modelName || "(empty)"}
+                    </span>
+                  </div>
+                  <div className="rounded-lg bg-slate-800/60 border border-slate-700/60 p-2.5">
+                    <span className="text-[10px] uppercase font-semibold text-slate-400 block">Scope</span>
+                    <span className="text-xs font-mono font-bold text-purple-300 truncate block">
+                      {preparedLLMPayload.requirementScope.mode === "all"
+                        ? `All (${preparedLLMPayload.requirementScope.totalRequirementsCount} Reqs)`
+                        : preparedLLMPayload.requirementScope.selectedIds?.join(", ") || "None"}
+                    </span>
+                  </div>
+                  <div className="rounded-lg bg-slate-800/60 border border-slate-700/60 p-2.5">
+                    <span className="text-[10px] uppercase font-semibold text-slate-400 block">Staged Cases</span>
+                    <span className="text-xs font-mono font-bold text-emerald-300 block">
+                      {preparedLLMPayload.testCases.length}
+                    </span>
+                  </div>
+                  <div className="rounded-lg bg-slate-800/60 border border-slate-700/60 p-2.5">
+                    <span className="text-[10px] uppercase font-semibold text-slate-400 block">Interface Ports</span>
+                    <span className="text-xs font-mono font-bold text-amber-300 block">
+                      {preparedLLMPayload.interface.totalInputs} in / {preparedLLMPayload.interface.totalOutputs} out
+                    </span>
                   </div>
                 </div>
-                {(showCode || !generatedCode.includes("\n")) && (
-                  <pre className="max-h-[500px] overflow-auto whitespace-pre-wrap rounded-lg bg-slate-900 p-4 font-mono text-xs leading-relaxed text-slate-300">
-                    {generatedCode}
+
+                {/* JSON Viewer */}
+                <div>
+                  <div className="flex items-center justify-between mb-1.5">
+                    <span className="text-[11px] font-medium text-slate-400 uppercase tracking-wider">
+                      Prepared JSON Object (What LLM Receives)
+                    </span>
+                    <span className="text-[10px] font-mono text-slate-500">
+                      {JSON.stringify(preparedLLMPayload).length.toLocaleString()} characters
+                    </span>
+                  </div>
+                  <pre className="max-h-[520px] overflow-auto whitespace-pre rounded-lg bg-slate-950 p-4 font-mono text-[11px] leading-relaxed text-slate-300 border border-slate-800">
+                    {JSON.stringify(preparedLLMPayload, null, 2)}
+                  </pre>
+                </div>
+              </div>
+            )}
+
+            {/* Tab 3: Stage 1 Flow */}
+            {activeTab === "flow" && (
+              <div className="rounded-xl border border-amber-900/30 bg-slate-900/80 p-4 space-y-4">
+                <div className="flex items-center justify-between mb-3">
+                  <h2 className="text-[11px] font-medium uppercase tracking-wider text-slate-400">
+                    Stage 1: Verified Test Case Flow
+                  </h2>
+                  {generatedFlow && (
+                    <button
+                      onClick={handleGenerateMatlab}
+                      disabled={isGeneratingMatlab}
+                      className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition ${
+                        isGeneratingMatlab
+                          ? "bg-slate-800 text-slate-500 cursor-not-allowed"
+                          : "bg-emerald-600 text-white hover:bg-emerald-500 shadow-lg shadow-emerald-900/20"
+                      }`}
+                    >
+                      {isGeneratingMatlab ? (
+                        <>
+                          <div className="h-3 w-3 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                          Generating MATLAB...
+                        </>
+                      ) : (
+                        <>
+                          <CheckCircle2 className="h-3.5 w-3.5" />
+                          Approve & Generate MATLAB
+                        </>
+                      )}
+                    </button>
+                  )}
+                </div>
+
+                {!generatedFlow ? (
+                  <div className="flex min-h-[300px] flex-col items-center justify-center text-center px-6">
+                    <ListChecks className="h-10 w-10 text-slate-700 mb-3" />
+                    <p className="text-sm text-slate-400 font-medium">No Flow Generated</p>
+                    <p className="text-xs text-slate-500 mt-1 max-w-sm">
+                      Click "Generate Stage 1: Test Case Flow" to analyze the requirements and create the structured test flow.
+                    </p>
+                  </div>
+                ) : (
+                  <div className="space-y-4">
+                    {matlabError && (
+                      <div className="flex items-center gap-1.5 text-xs text-red-400 bg-red-950/20 p-2.5 rounded-lg border border-red-800/30">
+                        <AlertCircle className="h-4 w-4 shrink-0" />
+                        {matlabError}
+                      </div>
+                    )}
+                    <pre className="max-h-[600px] overflow-auto whitespace-pre rounded-lg bg-slate-950 p-4 font-mono text-[11px] leading-relaxed text-slate-300 border border-slate-800">
+                      {JSON.stringify(generatedFlow, null, 2)}
+                    </pre>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Tab 4: Stage 2 MATLAB */}
+            {activeTab === "matlab" && (
+              <div className="rounded-xl border border-emerald-900/30 bg-slate-900/80 p-4 space-y-4">
+                <div className="flex items-center justify-between mb-3">
+                  <h2 className="text-[11px] font-medium uppercase tracking-wider text-slate-400">
+                    Stage 2: Generated MATLAB Script
+                  </h2>
+                  {generatedMatlab && (
+                    <button
+                      onClick={() => {
+                        const blob = new Blob([generatedMatlab], { type: "text/plain" });
+                        const url = URL.createObjectURL(blob);
+                        const a = document.createElement("a");
+                        a.href = url;
+                        a.download = `Test_${modelName.replace(/[^a-zA-Z0-9_-]/g, "_")}.m`;
+                        document.body.appendChild(a);
+                        a.click();
+                        a.remove();
+                        URL.revokeObjectURL(url);
+                      }}
+                      className={btnSecondary}
+                    >
+                      <Download className="h-3.5 w-3.5" />
+                      Download .m File
+                    </button>
+                  )}
+                </div>
+
+                {!generatedMatlab ? (
+                  <div className="flex min-h-[300px] flex-col items-center justify-center text-center px-6">
+                    <Code2 className="h-10 w-10 text-slate-700 mb-3" />
+                    <p className="text-sm text-slate-400 font-medium">No MATLAB Script Generated</p>
+                    <p className="text-xs text-slate-500 mt-1 max-w-sm">
+                      Approve the Test Case Flow in Stage 1 to generate the final MATLAB script.
+                    </p>
+                  </div>
+                ) : (
+                  <pre className="max-h-[600px] overflow-auto whitespace-pre rounded-lg bg-slate-950 p-4 font-mono text-[11px] leading-relaxed text-emerald-400 border border-slate-800">
+                    {generatedMatlab}
                   </pre>
                 )}
-                {!showCode && generatedCode.includes("\n") && (
-                  <p className="text-xs text-slate-500">
-                    {generatedCode.split("\n").length} lines · Click Expand to
-                    preview
-                  </p>
-                )}
-              </div>
-            )}
-
-            {/* Placeholder when no results */}
-            {!generatedCode && !isGenerating && (
-              <div className="flex min-h-[200px] flex-col items-center justify-center rounded-xl border border-slate-800 bg-slate-900/30 text-center">
-                <Code2 className="mb-3 h-10 w-10 text-slate-700" />
-                <p className="text-sm text-slate-500">
-                  Generated MATLAB test suite will appear here.
-                </p>
-                <p className="text-xs text-slate-600 mt-1">
-                  Upload requirements + ports, select a requirement, and
-                  generate.
-                </p>
-              </div>
-            )}
-
-            {isGenerating && (
-              <div className="flex min-h-[200px] flex-col items-center justify-center rounded-xl border border-blue-800/30 bg-blue-950/10">
-                <Loader2 className="mb-3 h-10 w-10 animate-spin text-blue-400" />
-                <p className="text-sm text-blue-300">
-                  Sending to LLM — generating MATLAB test blocks...
-                </p>
-                <p className="text-xs text-blue-400/60 mt-1">
-                  This may take a few minutes for large test suites.
-                </p>
               </div>
             )}
           </div>

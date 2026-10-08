@@ -32,7 +32,7 @@ export async function generateText(options: GenerateTextOptions): Promise<string
     prompt,
     systemInstruction,
     temperature = 0.2,
-    maxOutputTokens = 4096,
+    maxOutputTokens = 3000,
   } = options;
 
   const messages: OpenAI.ChatCompletionMessageParam[] = [];

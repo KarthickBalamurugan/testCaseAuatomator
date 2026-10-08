@@ -3,13 +3,14 @@ import { GoogleGenAI, createPartFromBase64 } from "@google/genai";
 import * as XLSX from "xlsx";
 import { DEFAULT_STANDARDIZER_PROMPT } from "@/lib/standardizer-types";
 
-const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+const ai = new GoogleGenAI({
+  apiKey: process.env.GOOGLE_API_KEY || process.env.GEMINI_API_KEY,
+});
 /** Models known to support file attachments — fallback order */
 const FALLBACK_MODELS = [
-  "gemini-2.5-flash",
-  "gemini-2.0-flash",
-  "gemini-1.5-flash",
+  "gemini-3.5-flash",
   "gemini-3.5-flash-lite",
+  "gemini-3.1-flash-lite",
 ];
 const DEFAULT_MODEL = FALLBACK_MODELS[0];
 
@@ -168,35 +169,16 @@ function extractJsonArray(raw: string): { requirementId: string; testCases: Reco
   return null;
 }
 
-/** Extract response text from GenerateContentResponse, handling edge cases. */
-function extractResponseText(response: Awaited<ReturnType<typeof ai.models.generateContent>>): string {
-  // Primary: use the .text getter (concatenates text parts from first candidate)
-  const text = (response.text ?? "").trim();
-  if (text) return text;
-
-  // Fallback: manually walk candidates → content → parts
-  const candidates = response.candidates;
-  if (candidates && candidates.length > 0) {
-    const parts = candidates[0]?.content?.parts;
-    if (parts && parts.length > 0) {
-      return parts
-        .map((p) => (typeof p === "object" && "text" in p ? p.text ?? "" : ""))
-        .join("")
-        .trim();
-    }
-  }
-  return "";
-}
 
 /* ─── POST Handler ───────────────────────────────────────────── */
 
 export async function POST(req: NextRequest) {
   try {
-    if (!process.env.GEMINI_API_KEY) {
+    if (!process.env.GOOGLE_API_KEY && !process.env.GEMINI_API_KEY) {
       return NextResponse.json(
         {
           error:
-            "GEMINI_API_KEY is not configured in the environment. Please add it to your environment variables.",
+            "GOOGLE_API_KEY or GEMINI_API_KEY is not configured in the environment.",
         },
         { status: 500 }
       );
@@ -280,7 +262,7 @@ export async function POST(req: NextRequest) {
           },
         });
 
-        responseText = extractResponseText(response);
+        responseText = response.text?.() || "";
         console.log(`[standardize] Model ${model} response length: ${responseText.length}`);
 
         if (responseText) {
